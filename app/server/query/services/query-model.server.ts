@@ -10,7 +10,6 @@ export {
   CHAT_MODEL as GENERAL_MODEL,
   CHAT_PROVIDER,
 } from "../../ai/chat-model.server";
-export const INTENT_ROUTING_TIMEOUT_MS = 10_000;
 export const INTENT_ROUTING_MAX_OUTPUT_TOKENS = 256;
 
 export function createQueryModel(streaming = false, maxOutputTokens?: number) {

@@ -201,6 +201,27 @@ function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
     example: {
       intent: candidate,
       text: `${candidate} example`,
+      recipeContinuation: typeof result === "object" &&
+          result !== null &&
+          "recipeContinuation" in result &&
+          typeof result.recipeContinuation === "boolean" &&
+          candidate === intent
+        ? result.recipeContinuation
+        : undefined,
+      shoppingMode: typeof result === "object" &&
+          result !== null &&
+          "shoppingMode" in result &&
+          (result.shoppingMode === "direct" || result.shoppingMode === "grocery_planner" || result.shoppingMode === "pantry_completion") &&
+          candidate === intent
+        ? result.shoppingMode
+        : undefined,
+      memoryUpdateRequested: typeof result === "object" &&
+          result !== null &&
+          candidate === intent
+        ? "memoryUpdateRequested" in result && typeof result.memoryUpdateRequested === "boolean"
+          ? result.memoryUpdateRequested
+          : undefined
+        : undefined,
     },
   }));
 }
@@ -324,10 +345,21 @@ function fakeDeps(input: {
       }),
     },
     loadMemoryContext: () => input.memoryContext ?? emptyMemoryContext(),
-    intentEmbeddingRouter: async () => ({
-      accepted: null,
-      candidates: intentChoicesForResult(input.intentResult ?? { intent: input.intent ?? "inventory" }),
-    }),
+    intentEmbeddingRouter: async () => {
+      const result = input.intentResult ?? { intent: input.intent ?? "inventory" };
+      const routingResult = typeof result === "object" && result !== null && "memoryUpdateRequested" in result
+        ? result
+        : {
+          ...typeof result === "object" && result !== null ? result : {},
+          intent: input.intent ?? "inventory",
+          memoryUpdateRequested: (input.memoryCandidates?.length ?? 0) > 0,
+        };
+
+      return {
+        accepted: null,
+        candidates: intentChoicesForResult(routingResult),
+      };
+    },
     persistMemoryValidations: async ({ validations }) =>
       validations.map((validation) => ({
         result: {
@@ -1054,6 +1086,60 @@ describe("query graph streaming", () => {
 
     expect(first.answer).toBe("Answering: How many eggs do I have?");
     expect(second.answer).toBe("Answering: How much lemonade do I have?");
+  });
+
+  it("sends recent chat messages to the response model separately from semantic memories", async () => {
+    setLangSmithEnv();
+
+    let capturedPayload: { context?: unknown } | null = null;
+    const result = await runQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "Tell me about that one.",
+        threadId: `test-${randomUUID()}`,
+        recentChatMessages: [
+          { role: "user", text: "Which recipes can I make?" },
+          { role: "assistant", text: "The top option is tomato soup." },
+        ],
+      },
+      fakeDeps({
+        intent: "general_chat",
+        memoryContext: {
+          ...emptyMemoryContext(),
+          semanticMemories: [{
+            id: "memory-1",
+            namespaceType: "user",
+            namespaceId: "default-user",
+            category: "old-topic",
+            content: "The user once asked about pancakes.",
+            source: "user_explicit",
+            confidence: 1,
+            active: true,
+            createdAt: "2026-07-17T00:00:00.000Z",
+            updatedAt: "2026-07-17T00:00:00.000Z",
+          }],
+        },
+        responseModel: {
+          invoke: async (messages: Array<{ content: unknown }>) => {
+            capturedPayload = JSON.parse(String(messages[1].content));
+            return new AIMessage("Tomato soup is the prior option.");
+          },
+        } as unknown as FridgeFriendChatModel,
+      }),
+    );
+
+    expect(result.answer).toBe("Tomato soup is the prior option.");
+    const responsePayload = capturedPayload as { context?: unknown } | null;
+    expect(responsePayload?.context).toMatchObject({
+      recentChatMessages: [
+        { role: "user", text: "Which recipes can I make?" },
+        { role: "assistant", text: "The top option is tomato soup." },
+      ],
+      semanticMemories: [
+        { content: "The user once asked about pancakes." },
+      ],
+    });
   });
 
   it("uses focused visual evidence instead of treating egg cartons as egg counts", async () => {
@@ -2401,7 +2487,7 @@ describe("query graph streaming", () => {
           recipeContinuation: false,
           shoppingMode: "direct",
           enrichment: { itemNames: [], fields: [] },
-          memoryUpdateRequested: false,
+          memoryUpdateRequested: true,
         },
         memoryCandidates: [
           {
@@ -2472,7 +2558,7 @@ describe("query graph streaming", () => {
             recipeContinuation: false,
             shoppingMode: "direct",
             enrichment: { itemNames: [], fields: [] },
-            memoryUpdateRequested: false,
+            memoryUpdateRequested: true,
           },
           memoryCandidates: [
             {
@@ -2536,7 +2622,117 @@ describe("query graph streaming", () => {
       expect(inventoryUpdatedEvent?.inventory).toMatchObject({ items: [] });
       expect(resumedEvents.at(-1)).toMatchObject({
         type: "final",
-        answer: "Removed carrots from the inventory.",
+        answer: "Removed carrots from your inventory.",
+      });
+    });
+  }, 10000);
+
+  it("answers approved consumed scanned inventory from the server mutation", async () => {
+    await withTestDatabase(async () => {
+      setLangSmithEnv();
+
+      const image = createFridgeImage({
+        dataUrl: createJpegDataUrl(),
+        originalName: "carrots.jpg",
+        storageLocation: "fridge",
+        baseImageId: null,
+      });
+
+      saveFridgeInventory({
+        imageId: image.id,
+        inventory: createInventory({
+          item: {
+            id: "carrots-1",
+            name: "carrot",
+            label: "Carrots",
+            cat: "produce",
+            pack: "bag",
+          },
+        }),
+      });
+
+      const threadId = `test-${randomUUID()}`;
+      const firstEvents: QueryStreamEvent[] = [];
+
+      for await (const event of streamQueryForFridgeImage(
+        {
+          fridgeId: "fridge-1",
+          imageId: image.id,
+          query: "I ate the carrots",
+          threadId,
+        },
+        fakeDeps({
+          intentResult: {
+            intent: "inventory",
+            recipeContinuation: false,
+            shoppingMode: "direct",
+            enrichment: { itemNames: [], fields: [] },
+            memoryUpdateRequested: true,
+          },
+          memoryCandidates: [
+            {
+              kind: "inventory_item",
+              scope: "fridge",
+              action: "consume",
+              name: "carrots",
+              storageLocation: "fridge",
+              quantity: null,
+              notes: null,
+              explicit: true,
+            },
+          ],
+          overrides: {
+            loadInventoryForImage: getFridgeInventoryForImage,
+            persistMemoryValidations: undefined,
+          },
+        }),
+      )) {
+        firstEvents.push(event);
+      }
+
+      expect(firstEvents).toContainEqual({
+        type: "inventory_mutation_review",
+        operation: "consume",
+        itemName: "carrots",
+        storageLocation: "fridge",
+      });
+      expect(getFridgeInventoryForImage(image.id)?.items.map((item) => item.name)).toEqual(["carrot"]);
+
+      const resumedEvents: QueryStreamEvent[] = [];
+
+      for await (const event of resumeQueryForFridgeImage(
+        {
+          threadId,
+          resume: {
+            answers: {},
+            skipped: [],
+            inventoryMutationReview: { approved: true },
+          },
+        },
+        fakeDeps({
+          overrides: {
+            loadInventoryForImage: getFridgeInventoryForImage,
+            persistMemoryValidations: undefined,
+            responseModel: {
+              invoke: async () => {
+                throw new Error("Response model should not reinterpret verified scanned inventory mutations");
+              },
+            } as unknown as FridgeFriendChatModel,
+          },
+        }),
+      )) {
+        resumedEvents.push(event);
+      }
+
+      const inventoryUpdatedEvent = resumedEvents.find((event): event is Extract<QueryStreamEvent, { type: "inventory_updated" }> =>
+        event.type === "inventory_updated"
+      );
+
+      expect(getFridgeInventoryForImage(image.id)?.items).toEqual([]);
+      expect(inventoryUpdatedEvent?.inventory).toMatchObject({ items: [] });
+      expect(resumedEvents.at(-1)).toMatchObject({
+        type: "final",
+        answer: "Marked carrots as consumed and removed the matching item from your inventory.",
       });
     });
   }, 10000);

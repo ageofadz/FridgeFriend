@@ -11,7 +11,7 @@ import {
 import { QueryResumeSchema } from "../server/query/schemas/query";
 import { jsonError } from "../server/http.server";
 import { ConversationContextSchema, type ConversationContext } from "../workspace/contracts";
-import { resumeChatExecution, startChatTurn, updateChatAssistantMessage } from "../server/chat/repository.server";
+import { getChat, recentChatMessagesForQuery, resumeChatExecution, startChatTurn, updateChatAssistantMessage } from "../server/chat/repository.server";
 import type { QueryStreamEvent } from "../workspace/query-events";
 
 type QueryRequestBody = {
@@ -241,6 +241,11 @@ export async function action({ request }: ActionFunctionArgs) {
       });
       return createQueryContinuationStreamResponse(body, queryStreamPersistence({ ...body, assistantMessageId }));
     }
+    const chat = getChat(body.threadId, {
+      userId: body.userId ?? "default-user",
+      fridgeId: body.fridgeId,
+      imageId: body.imageId,
+    });
     const input = {
       userId: body.userId,
       fridgeId: body.fridgeId,
@@ -250,6 +255,7 @@ export async function action({ request }: ActionFunctionArgs) {
       requestId: body.requestId,
       recipeContinuation: body.recipeContinuation,
       conversationContext: body.conversationContext,
+      recentChatMessages: recentChatMessagesForQuery(chat),
     };
 
     startChatTurn({

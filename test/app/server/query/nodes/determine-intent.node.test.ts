@@ -3,11 +3,6 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { describe, expect, it } from "vitest";
 
 import { createDetermineIntentNode } from "../../../../../app/server/query/nodes/determine-intent.node";
-import {
-  CHAT_PROVIDER,
-  GENERAL_MODEL,
-  INTENT_ROUTING_TIMEOUT_MS,
-} from "../../../../../app/server/query/services/query-model.server";
 import type {
   IntentRoutingChoice,
   QueryGraphDependencies,
@@ -76,6 +71,27 @@ function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
     example: {
       intent: candidate,
       text: `${candidate} example`,
+      recipeContinuation: typeof result === "object" &&
+          result !== null &&
+          "recipeContinuation" in result &&
+          typeof result.recipeContinuation === "boolean" &&
+          candidate === intent
+        ? result.recipeContinuation
+        : undefined,
+      shoppingMode: typeof result === "object" &&
+          result !== null &&
+          "shoppingMode" in result &&
+          (result.shoppingMode === "direct" || result.shoppingMode === "grocery_planner" || result.shoppingMode === "pantry_completion") &&
+          candidate === intent
+        ? result.shoppingMode
+        : undefined,
+      memoryUpdateRequested: typeof result === "object" &&
+          result !== null &&
+          "memoryUpdateRequested" in result &&
+          typeof result.memoryUpdateRequested === "boolean" &&
+          candidate === intent
+        ? result.memoryUpdateRequested
+        : undefined,
     },
   }));
 }
@@ -111,12 +127,12 @@ function deps(
 }
 
 describe("determine intent node", () => {
-  it("routes with prior recipe session context", async () => {
-    let capturedMessages: unknown;
+  it("routes with prior recipe session context without model classification", async () => {
+    let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
       { intent: "recipe", recipeContinuation: true },
-      (messages) => {
-        capturedMessages = messages;
+      () => {
+        modelCalls += 1;
       },
     ));
 
@@ -128,21 +144,13 @@ describe("determine intent node", () => {
       },
       recipeSearchExhausted: false,
     }));
-    const messages = capturedMessages as Array<{ content: unknown }>;
-    const payload = JSON.parse(String(messages[1].content));
 
+    expect(modelCalls).toBe(0);
     expect(result.intent).toBe("recipe");
     expect(result.context).toMatchObject({
       intentRouting: {
         recipeContinuation: true,
       },
-    });
-    expect(String(messages[0].content)).toContain("recipe recommendations/ details, or options from a previous recipe set");
-    expect(payload.priorRecipeSearch).toMatchObject({
-      semanticQuery: "fridge recipes",
-      useAvailableIngredients: true,
-      shownRecipeCount: 2,
-      exhausted: false,
     });
   });
 
@@ -249,7 +257,7 @@ describe("determine intent node", () => {
     });
   });
 
-  it("uses model classification when embedding routing is unresolved", async () => {
+  it("uses the top embedding candidate when embedding routing is unresolved", async () => {
     let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
       { intent: "organization", enrichment: { itemNames: [], fields: [] } },
@@ -260,22 +268,15 @@ describe("determine intent node", () => {
 
     const result = await node(state({ query: "Can you help with this?" }));
 
-    expect(modelCalls).toBe(1);
+    expect(modelCalls).toBe(0);
     expect(result).toMatchObject({
       intent: "organization",
     });
   });
 
-  it("limits model intent choices to the top three embedding candidates", async () => {
-    let capturedMessages: unknown;
-    let capturedSchema: unknown;
+  it("routes to the top embedding candidate when no direct acceptance is returned", async () => {
     const node = createDetermineIntentNode({
-      ...deps(
-        { intent: "shopping", enrichment: { itemNames: [], fields: [] } },
-        (messages) => {
-          capturedMessages = messages;
-        },
-      ),
+      ...deps({ intent: "inventory" }),
       intentEmbeddingRouter: async () => ({
         accepted: null,
         candidates: [
@@ -285,13 +286,10 @@ describe("determine intent node", () => {
         ],
       }),
       intentModel: {
-        withStructuredOutput: (schema: unknown) => {
-          capturedSchema = schema;
+        withStructuredOutput: () => {
           return {
-            invoke: async (messages: unknown, options: unknown) => {
-              capturedMessages = messages;
-              expect(options).toBeDefined();
-              return { intent: "shopping", enrichment: { itemNames: [], fields: [] }, memoryUpdateRequested: false };
+            invoke: async () => {
+              throw new Error("intent model should not run when candidates are available");
             },
           };
         },
@@ -301,64 +299,46 @@ describe("determine intent node", () => {
     await expect(node(state({ query: "What am I missing for dinner?" }))).resolves.toMatchObject({
       intent: "shopping",
     });
-
-    const messages = capturedMessages as Array<{ content: unknown }>;
-    const systemPrompt = String(messages[0].content);
-    expect(systemPrompt).toContain("shopping: groceries, restocking, replacements, missing ingredients.");
-    expect(systemPrompt).toContain("recipe: cooking ideas, meal planning, recipe recommendations/ details, or options from a previous recipe set.");
-    expect(systemPrompt).toContain("inventory: current recorded food inventory, quantities, locations, or visible item facts.");
-    expect(systemPrompt).not.toContain("space: physical storage fit or shelf capacity");
-    expect(capturedSchema).toMatchObject({
-      properties: {
-        intent: {
-          enum: ["shopping", "recipe", "inventory"],
-        },
-      },
-    });
   });
 
-  it("sets a ten-second deadline on intent routing", async () => {
-    let capturedOptions: unknown;
-    const node = createDetermineIntentNode(deps(
-      { intent: "recipe", recipeContinuation: false },
-      (_messages, options) => {
-        capturedOptions = options;
-      },
-    ));
-
-    await node(state());
-
-    expect(capturedOptions).toMatchObject({
-      timeout: INTENT_ROUTING_TIMEOUT_MS,
-      metadata: { provider: CHAT_PROVIDER, model: GENERAL_MODEL },
+  it("returns clarification when routing returns no candidates", async () => {
+    const node = createDetermineIntentNode({
+      ...deps({ intent: "unknown_route" }),
+      intentEmbeddingRouter: async () => ({
+        accepted: null,
+        candidates: [],
+      }),
     });
-  });
-
-  it("returns clarification when structured routing output is invalid", async () => {
-    const node = createDetermineIntentNode(deps({ intent: "unknown_route" }));
     const result = await node(state());
 
     expect(result.intent).toBe("clarification");
     expect(result.context).toMatchObject({
-      intentRoutingError: expect.stringContaining("Intent routing returned invalid output"),
+      intentRoutingError: "Intent routing returned no candidates",
     });
   });
 
-  it("adds intent-routing context to provider invocation failures", async () => {
+  it("does not call the provider when routing returns no candidates", async () => {
     const node = createDetermineIntentNode({
       ...deps({}),
+      intentEmbeddingRouter: async () => ({
+        accepted: null,
+        candidates: [],
+      }),
       intentModel: {
         withStructuredOutput: () => ({
           invoke: async () => {
-            throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+            throw new Error("intent model should not run without router candidates");
           },
         }),
       } as unknown as FridgeFriendChatModel,
     });
 
-    await expect(node(state({ query: "How can I arrange my fridge more efficiently?" }))).rejects.toThrow(
-      'Intent routing failed for query "How can I arrange my fridge more efficiently?" after 10000ms: The operation was aborted due to timeout',
-    );
+    await expect(node(state({ query: "How can I arrange my fridge more efficiently?" }))).resolves.toMatchObject({
+      intent: "clarification",
+      context: {
+        intentRoutingError: "Intent routing returned no candidates",
+      },
+    });
   });
 
   it("accepts the expiry workflow intent", async () => {
@@ -369,12 +349,12 @@ describe("determine intent node", () => {
     });
   });
 
-  it("instructs the model with the selected organization choice", async () => {
-    let capturedMessages: unknown;
+  it("routes organization choices without model classification", async () => {
+    let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
       { intent: "organization", enrichment: { itemNames: [], fields: [] } },
-      (messages) => {
-        capturedMessages = messages;
+      () => {
+        modelCalls += 1;
       },
     ));
 
@@ -382,10 +362,7 @@ describe("determine intent node", () => {
       intent: "organization",
     });
 
-    const messages = capturedMessages as Array<{ content: unknown }>;
-    const systemPrompt = String(messages[0].content);
-    expect(systemPrompt).toContain("organization: arranging, reorganizing, improving storage efficiency, grouping, moving inventory.");
-    expect(systemPrompt).not.toContain("space: physical storage fit or shelf capacity");
+    expect(modelCalls).toBe(0);
   });
 
   it("accepts general chat as a non-clarification route", async () => {

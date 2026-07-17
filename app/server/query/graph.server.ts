@@ -41,7 +41,9 @@ import { createPlanPlacementCorrectionNode } from "./nodes/plan-placement-correc
 import { validateMemoryCandidatesNode } from "./nodes/validate-memory-candidates.node";
 import {
   routeIntent,
-  routeIntentOrMemory,
+  routeIntentOrInventoryMemory,
+  routePostResponseMemory,
+  routeAfterMemoryReload,
   routeAfterInventoryEnrichment,
   routeRecipeRetrievalGrade,
   routeRecipeQueryRewrite,
@@ -136,6 +138,7 @@ function normalizeQueryInput(input: QueryGraphInput) {
         selectedZoneIds: [],
         selectedRecipeId: null,
       },
+      recentChatMessages: input.recentChatMessages ?? [],
       workspaceActions: [],
     },
   };
@@ -215,8 +218,9 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     .addEdge(START, "load_context")
     .addEdge("load_context", "apply_seeded_inventory_assertions")
     .addEdge("apply_seeded_inventory_assertions", "determine_intent")
-    .addConditionalEdges("determine_intent", routeIntentOrMemory, {
-      inventory: "extract_memory_candidates",
+    .addConditionalEdges("determine_intent", routeIntentOrInventoryMemory, {
+      inventory: "query_inventory",
+      memory_update: "extract_memory_candidates",
       expiry: "query_inventory",
       food_knowledge: "respond",
       recipe: "query_inventory",
@@ -224,15 +228,14 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       space: "calculate_space",
       organization: "query_inventory",
       placement_correction: "query_inventory",
-      general_chat: "extract_memory_candidates",
+      general_chat: "respond",
       clarification: "request_clarification",
-      memory_update: "extract_memory_candidates",
     })
     .addEdge("extract_memory_candidates", "validate_memory_candidates")
     .addEdge("validate_memory_candidates", "apply_memory_writes")
     .addEdge("apply_memory_writes", "index_semantic_memory")
     .addEdge("index_semantic_memory", "reload_memory_context")
-    .addConditionalEdges("reload_memory_context", routeIntent, {
+    .addConditionalEdges("reload_memory_context", routeAfterMemoryReload, {
       inventory: "query_inventory",
       expiry: "query_inventory",
       food_knowledge: "respond",
@@ -243,6 +246,7 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       placement_correction: "query_inventory",
       general_chat: "respond",
       clarification: "request_clarification",
+      plan_workspace_actions: "plan_workspace_actions",
     })
     .addConditionalEdges("query_inventory", routeInventorySplitProposal, {
       propose_scoped_inventory_split: "propose_scoped_inventory_split",
@@ -296,7 +300,10 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     .addEdge("plan_placement_correction", "respond")
     .addEdge("calculate_space", "respond")
     .addEdge("request_clarification", END)
-    .addEdge("respond", "plan_workspace_actions")
+    .addConditionalEdges("respond", routePostResponseMemory, {
+      extract_memory_candidates: "extract_memory_candidates",
+      plan_workspace_actions: "plan_workspace_actions",
+    })
     .addConditionalEdges("plan_workspace_actions", routeScopedInventorySplitReview, {
       review: "review_inventory_split",
       end: END,

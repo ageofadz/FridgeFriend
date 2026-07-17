@@ -71,22 +71,28 @@ flowchart TD
 
   subgraph Query["query_graph"]
     Load["load_context"]
+    SeededAssert["apply_seeded_inventory_assertions"]
     Intent["determine_intent"]
-    Memory["extract and validate memory<br/>and inventory mutations"]
+    Memory["extract and validate memory"]
     MutationReview["HITL mutation approval"]
     MemoryWrite["write, index,<br/>reload memory"]
     Inventory["query_inventory"]
+    SplitProposal["propose scoped inventory split"]
     Enrich["assess enrichment"]
     FocusedVLM["focused VLM crop"]
     HumanReview["human clarification"]
-    Recipes["recipe RAG and tournament"]
-    Plans["expiry, grocery, pantry,<br/>organization, placement"]
+    PersistEnrichment["persist enrichment"]
+    RecipeSearch["build recipe search"]
+    RecipeRAG["retrieve, rank, grade,<br/>rewrite recipes"]
+    Tournament["recipe tournament"]
+    Plans["expiry, grocery, pantry,<br/>organization, placement, space"]
     Respond["respond"]
     Workspace["plan_workspace_actions"]
+    SplitReview["HITL split review"]
   end
 
   Store["SQLite<br/>images, inventories, memory, checkpoints"]
-  Chroma["Chroma<br/>recipes and semantic memory"]
+  Chroma["Chroma<br/>recipes, semantic memory,<br/>intent examples"]
   Gemini["Gemini<br/>vision, chat, embeddings"]
 
   User --> UI
@@ -103,20 +109,34 @@ flowchart TD
   Reconcile --> ScanFailed
   FinalizeScan --> Store
 
-  UI --> QueryAPI --> Load --> Intent
-  Intent -- "inventory / memory update" --> Memory
-  Memory --> MutationReview --> MemoryWrite
-  Memory --> MemoryWrite --> Inventory
-  Intent -- "planning routes" --> Inventory
-  Intent --> Respond
+  UI --> QueryAPI --> Load --> SeededAssert --> Intent
+  Intent -- "inventory memory update" --> Memory
+  Intent -- "inventory / recipe / shopping / expiry / organization / placement" --> Inventory
+  Intent -- "food knowledge / general chat" --> Respond
+  Intent -- "space" --> Plans
+  Intent -- "clarification" --> UI
+  Memory --> MutationReview
+  Memory --> MemoryWrite
+  MutationReview --> MemoryWrite
+  MemoryWrite --> Inventory
+  MemoryWrite --> Respond
+  MemoryWrite --> Workspace
+  Inventory --> SplitProposal --> Enrich
   Inventory --> Enrich
-  Enrich --> FocusedVLM --> Enrich
-  Enrich --> HumanReview --> Enrich
-  Enrich --> Recipes
+  Enrich --> FocusedVLM --> PersistEnrichment --> Enrich
+  Enrich --> HumanReview --> PersistEnrichment
+  Enrich --> RecipeSearch
   Enrich --> Plans
-  Recipes --> Plans
-  Recipes --> Respond
-  Plans --> Respond --> Workspace --> UI
+  Enrich --> Respond
+  RecipeSearch --> RecipeRAG
+  RecipeRAG --> RecipeSearch
+  RecipeRAG --> Tournament --> Respond
+  RecipeRAG --> Plans
+  Plans --> RecipeSearch
+  Plans --> Respond
+  Respond -- "profile memory update" --> Memory
+  Respond --> Workspace --> SplitReview --> UI
+  Workspace --> UI
 
   Scan --> Gemini
   Query --> Gemini
@@ -238,7 +258,7 @@ The query graph uses a `manage_household_inventory` tool for persistent househol
 
 Scanned image inventory is separate. The tool only mutates scanned inventory through explicit server-side update paths when a user-approved correction or removal changes the visible inventory.
 
-For intent detection, I settled on a hybrid system, where embeddings are used to classify user intent, and below a certain cosine similarity threshhold, we grab the closest nearby candidate intentions and have the LLM choose one.
+For intent detection, the query graph uses fast local routing first, then a Chroma-backed set of pre-embedded intent examples for less obvious requests. The router returns ranked candidates directly to the graph rather than waiting on an LLM classifier in the hot path.
 
 ## What I could improve on
 

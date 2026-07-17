@@ -20,7 +20,9 @@ const INTENT_EMBEDDING_MODEL = "gemini-embedding-001";
 const INTENT_EMBEDDING_DIMENSIONS = 768;
 const INTENT_EMBEDDING_ACCEPTANCE_THRESHOLD = 0.62;
 const INTENT_EMBEDDING_ACCEPTANCE_MARGIN = 0.035;
-const INTENT_EXAMPLE_CORPUS_VERSION = "2026-07-18";
+const INTENT_EXAMPLE_CORPUS_VERSION = "2026-07-18-delete-mutations";
+const LOCAL_INTENT_ACCEPTANCE_SCORE = 0.34;
+const LOCAL_INTENT_ACCEPTANCE_MARGIN = 0.08;
 
 type ShoppingMode = IntentResponse["shoppingMode"];
 
@@ -105,8 +107,8 @@ export const INTENT_EMBEDDING_EXAMPLES: IntentEmbeddingExample[] = [
   { intent: "inventory", text: "Do I have any chicken left?" },
   { intent: "inventory", text: "List the visible items in this fridge." },
   { intent: "inventory", text: "How much milk do I have?" },
-  { intent: "inventory", text: "Which drinks are in the door?" },
-  { intent: "inventory", text: "Show the current recorded freezer inventory." },
+  { intent: "inventory", text: "Delete the carrots from my inventory.", memoryUpdateRequested: true },
+  { intent: "inventory", text: "I ate the carrots.", memoryUpdateRequested: true },
   { intent: "inventory", text: "Is there cheese in here?" },
   { intent: "inventory", text: "What produce is available right now?" },
 
@@ -455,11 +457,75 @@ function intentResponseFromCandidate(candidate: IntentEmbeddingRouteCandidate): 
   };
 }
 
+function normalizedWords(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 1);
+}
+
+function localIntentCandidates(query: string) {
+  const queryWords = new Set(normalizedWords(query));
+  const bestByIntent = new Map<QueryIntent, IntentEmbeddingRouteCandidate>();
+
+  for (const example of INTENT_EMBEDDING_EXAMPLES) {
+    const exampleWords = new Set(normalizedWords(example.text));
+    let overlap = 0;
+
+    for (const word of queryWords) {
+      if (exampleWords.has(word)) overlap += 1;
+    }
+
+    if (overlap === 0) continue;
+
+    const score = overlap / Math.sqrt(queryWords.size * exampleWords.size);
+    const current = bestByIntent.get(example.intent);
+
+    if (!current || score > current.score) {
+      bestByIntent.set(example.intent, {
+        intent: example.intent,
+        score,
+        margin: 0,
+        example,
+      });
+    }
+  }
+
+  const ranked = [...bestByIntent.values()].sort((left, right) => right.score - left.score);
+  return ranked.map((candidate, index) => ({
+    ...candidate,
+    margin: candidate.score - (ranked[index + 1]?.score ?? 0),
+  })).slice(0, 3);
+}
+
+function selectLocalIntentRoute(query: string) {
+  const candidates = localIntentCandidates(query);
+  const match = candidates[0] &&
+      candidates[0].score >= LOCAL_INTENT_ACCEPTANCE_SCORE &&
+      candidates[0].margin >= LOCAL_INTENT_ACCEPTANCE_MARGIN
+    ? candidates[0]
+    : null;
+
+  return {
+    accepted: match ? intentResponseFromCandidate(match) : null,
+    candidates,
+  };
+}
+
 export async function routeIntentCandidatesByEmbedding(
   input: { query: string },
   dependencies: IntentEmbeddingDependencies = {},
 ): Promise<IntentEmbeddingRoutingResult> {
   try {
+    const localResult = selectLocalIntentRoute(input.query);
+
+    if (localResult.accepted) {
+      return localResult;
+    }
+
     const embeddings = dependencies.embedQuery && dependencies.embedDocuments
       ? {
         embedQuery: dependencies.embedQuery,

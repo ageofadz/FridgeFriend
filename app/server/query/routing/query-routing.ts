@@ -27,6 +27,28 @@ export function routeIntentOrMemory(
   return routeIntent(state);
 }
 
+export function routeIntentOrInventoryMemory(
+  state: FridgeQueryStateValue,
+): QueryIntent | "memory_update" {
+  if (state.intent === "inventory" && shouldExtractMemoryCandidates(state)) {
+    return "memory_update";
+  }
+
+  return routeIntent(state);
+}
+
+export function routePostResponseMemory(
+  state: FridgeQueryStateValue,
+): "extract_memory_candidates" | "plan_workspace_actions" {
+  return shouldExtractMemoryCandidates(state) ? "extract_memory_candidates" : "plan_workspace_actions";
+}
+
+export function routeAfterMemoryReload(
+  state: FridgeQueryStateValue,
+): QueryIntent | "plan_workspace_actions" {
+  return state.answer ? "plan_workspace_actions" : routeIntent(state);
+}
+
 export function routeInventoryFollowup(
   state: FridgeQueryStateValue,
 ): "respond" | "build_recipe_search" | "plan_expiry" | "plan_organization" | "plan_placement_correction" {

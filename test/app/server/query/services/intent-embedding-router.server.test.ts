@@ -113,7 +113,7 @@ describe("intent embedding router", () => {
       },
     };
     const result = await routeIntentCandidatesByEmbedding(
-      { query: "Can you help with this?" },
+      { query: "blue triangle cabinet" },
       {
         embedDocuments: async () => INTENT_EMBEDDING_EXAMPLES.map((_, index) => fullVector(index % 2)),
         embedQuery: async () => fullVector(0),
@@ -172,6 +172,74 @@ describe("intent embedding router", () => {
     });
   });
 
+  it("routes explicit scanned inventory consumption as a memory update", async () => {
+    const upserts: Array<{
+      ids: string[];
+      documents: string[];
+      metadatas: Array<Record<string, unknown>>;
+    }> = [];
+    const collection = {
+      handle: {
+        get: async () => ({ ids: [] }),
+        upsert: async (input: {
+          ids: string[];
+          documents: string[];
+          metadatas: Array<Record<string, unknown>>;
+        }) => {
+          upserts.push(input);
+        },
+        query: async () => ({
+          rows: () => [
+            queryRowsFromUpserts(
+              upserts,
+              INTENT_EMBEDDING_EXAMPLES.map((example) =>
+                example.text === "I ate the carrots." ? 0 : 2),
+            ),
+          ],
+        }),
+      },
+    };
+    const result = await routeIntentByEmbedding(
+      { query: "I ate the carrots" },
+      {
+        embedDocuments: async (documents) =>
+          documents.map((document) =>
+            document === "I ate the carrots."
+              ? fullVector(0)
+              : fullVector(1)),
+        embedQuery: async () => fullVector(0),
+        getCollection: async () => collection as never,
+      },
+    );
+
+    expect(result).toMatchObject({
+      intent: "inventory",
+      memoryUpdateRequested: true,
+    });
+  });
+
+  it("routes clear intent requests locally without embedding or Chroma", async () => {
+    const result = await routeIntentCandidatesByEmbedding(
+      { query: "Make a grocery list for tacos." },
+      {
+        embedDocuments: async () => {
+          throw new Error("intent examples should not be embedded for a clear local route");
+        },
+        embedQuery: async () => {
+          throw new Error("query should not be embedded for a clear local route");
+        },
+        getCollection: async () => {
+          throw new Error("Chroma should not be loaded for a clear local route");
+        },
+      },
+    );
+
+    expect(result.accepted).toMatchObject({
+      intent: "shopping",
+      shoppingMode: "grocery_planner",
+    });
+  });
+
   it("does not re-embed intent examples already present in Chroma", async () => {
     let embedDocumentCalls = 0;
     const collection = {
@@ -185,7 +253,7 @@ describe("intent embedding router", () => {
             document: "Make a grocery list for tacos.",
             metadata: {
               documentType: "intent_example",
-              corpusVersion: "2026-07-18",
+              corpusVersion: "2026-07-18-delete-mutations",
               intent: "shopping",
               exampleIndex: 43,
               recipeContinuation: false,
@@ -197,7 +265,7 @@ describe("intent embedding router", () => {
             document: "Suggest three dinner ideas with chicken.",
             metadata: {
               documentType: "intent_example",
-              corpusVersion: "2026-07-18",
+              corpusVersion: "2026-07-18-delete-mutations",
               intent: "recipe",
               exampleIndex: 30,
               recipeContinuation: false,
@@ -210,7 +278,7 @@ describe("intent embedding router", () => {
       },
     };
 
-    const result = await routeIntentCandidatesByEmbedding({ query: "Make a grocery list for tacos." }, {
+    const result = await routeIntentCandidatesByEmbedding({ query: "Supplies for next week." }, {
       embedDocuments: async () => {
         embedDocumentCalls += 1;
         return [];

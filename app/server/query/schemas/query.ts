@@ -124,7 +124,7 @@ export const IntentResponseProviderSchema = {
     },
     memoryUpdateRequested: {
       type: "boolean",
-      description: "True only when the user explicitly states durable inventory outside the scanned storage, a dietary restriction or identity, a food preference, a personal goal, or a durable household fact that should be saved.",
+      description: "True only when the user explicitly states an inventory item change, including adding household inventory or deleting, removing, consuming, or finishing a scanned item; a dietary restriction or identity; a food preference; a personal goal; or a durable household fact that should be saved.",
     },
   },
   required: ["intent", "enrichment", "memoryUpdateRequested"],
@@ -338,6 +338,10 @@ export type QueryGraphInput = {
   requestId?: string;
   recipeContinuation?: boolean;
   conversationContext?: ConversationContext;
+  recentChatMessages?: Array<{
+    role: "user" | "assistant";
+    text: string;
+  }>;
 };
 
 export const InventoryClarificationResumeSchema = z.object({

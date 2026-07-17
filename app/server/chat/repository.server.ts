@@ -169,6 +169,18 @@ export function getChat(id: string, scope: ChatScope): PersistedChat {
   return loadChat(id, scope);
 }
 
+export function recentChatMessagesForQuery(chat: PersistedChat) {
+  return chat.messages
+    .filter((message) => message.status !== "running")
+    .flatMap((message) => {
+      const text = message.payload.text;
+      return typeof text === "string" && text.trim().length > 0
+        ? [{ role: message.role, text: text.trim() }]
+        : [];
+    })
+    .slice(-12);
+}
+
 export function startChatTurn(input: ChatScope & {
   threadId: string;
   userMessage: ChatMessageInput;

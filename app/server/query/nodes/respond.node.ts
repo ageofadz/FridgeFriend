@@ -120,6 +120,7 @@ function createHumanMessageContent(input: {
     intent: input.state.intent,
     context: {
       conversationContext: input.state.context.conversationContext,
+      recentChatMessages: input.state.context.recentChatMessages,
       intentRouting: input.state.context.intentRouting,
       queryMode: input.state.context.queryMode ?? input.state.intent,
       inventoryQuery,
@@ -254,6 +255,86 @@ function inventoryWasEnriched(state: FridgeQueryStateValue) {
     enrichment.attempts > 0;
 }
 
+function verifiedScannedInventoryMutationAnswer(state: FridgeQueryStateValue) {
+  const verification = state.context.memoryWriteVerification;
+  if (
+    typeof verification !== "object" ||
+    verification === null ||
+    !("status" in verification) ||
+    verification.status !== "verified"
+  ) {
+    return null;
+  }
+
+  if (!Array.isArray(state.context.scannedInventoryMutations)) {
+    return null;
+  }
+
+  const acceptedMutations = state.memoryValidations.flatMap((validation) => {
+    const candidate = validation.candidate;
+
+    if (
+      !validation.accepted ||
+      candidate.kind !== "inventory_item" ||
+      (candidate.action !== "consume" && candidate.action !== "remove")
+    ) {
+      return [];
+    }
+
+    return [{
+      action: candidate.action,
+      name: candidate.name,
+      storageLocation: candidate.storageLocation,
+    }];
+  });
+
+  if (acceptedMutations.length === 0) {
+    return null;
+  }
+
+  const mutations = state.context.scannedInventoryMutations.filter((mutation): mutation is {
+    status: "updated";
+    action: "consume" | "remove";
+    itemName: string;
+    storageLocation: string;
+    removedItemIds: string[];
+  } =>
+    typeof mutation === "object" &&
+    mutation !== null &&
+    "status" in mutation &&
+    mutation.status === "updated" &&
+    "action" in mutation &&
+    (mutation.action === "consume" || mutation.action === "remove") &&
+    "itemName" in mutation &&
+    typeof mutation.itemName === "string" &&
+    "storageLocation" in mutation &&
+    typeof mutation.storageLocation === "string" &&
+    "removedItemIds" in mutation &&
+    Array.isArray(mutation.removedItemIds) &&
+    mutation.removedItemIds.length > 0
+  ).filter((mutation) =>
+    acceptedMutations.some((candidate) =>
+      candidate.action === mutation.action &&
+      candidate.name === mutation.itemName &&
+      candidate.storageLocation === mutation.storageLocation
+    )
+  );
+
+  if (mutations.length === 0) {
+    return null;
+  }
+
+  const names = [...new Set(mutations.map((mutation) => mutation.itemName))];
+  const itemText = names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  const consumed = mutations.every((mutation) => mutation.action === "consume");
+
+  return consumed
+    ? `Marked ${itemText} as consumed and removed the matching item${mutations.length === 1 ? "" : "s"} from your inventory.`
+    : `Removed ${itemText} from your inventory.`;
+}
+
 async function createResponseMessages(input: {
   query: string;
   state: FridgeQueryStateValue;
@@ -342,6 +423,11 @@ export function createRespondNode(deps: QueryGraphDependencies) {
 
     if (!loadedPrompt) {
       throw new Error("Missing query response prompt in query graph dependencies");
+    }
+
+    const mutationAnswer = verifiedScannedInventoryMutationAnswer(state);
+    if (mutationAnswer) {
+      return { answer: mutationAnswer };
     }
 
     const seededContextItems = scopedSeededItems(state, inventory);

@@ -2100,7 +2100,6 @@ export function FridgeQueryChat({
           <textarea
             aria-label="Ask FridgeFriend"
             className="ff-chat-field"
-            disabled={isPending || clarification !== null || splitReview !== null || mutationReview !== null}
             onKeyDown={handleFieldKeyDown}
             onChange={(event) => setInput(event.currentTarget.value)}
             placeholder={CHATBOX_EXAMPLE_PROMPTS[placeholderIndex]}
