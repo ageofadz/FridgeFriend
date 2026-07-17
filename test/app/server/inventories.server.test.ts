@@ -13,6 +13,7 @@ import {
   applyFridgeInventorySplit,
   inventoryWithoutStorageLocation,
   mergeStorageInventory,
+  removeItemsFromFridgeInventory,
   saveFridgeInventory,
 } from "../../../app/server/inventories.server";
 import { fridgeInventories } from "../../../app/server/db/schema.server";
@@ -386,6 +387,65 @@ describe("fridge inventory persistence", () => {
     deleteFridgeImage(image.id);
 
     expect(getFridgeInventoryForImage(image.id)).toBeNull();
+  });
+
+  it("removes scanned inventory by pluralized subcategory", () => {
+    const image = createFridgeImage({
+      dataUrl: createJpegDataUrl(),
+      originalName: "fridge.jpg",
+      storageLocation: "fridge",
+      baseImageId: null,
+    });
+    const inventory = createInventory(image.id);
+    inventory.items[0] = {
+      ...inventory.items[0],
+      name: "bagged vegetable",
+      label: "Produce bag",
+      cat: "produce",
+      subcat: "carrot",
+      pack: "bag",
+    };
+    saveFridgeInventory({ imageId: image.id, inventory });
+
+    const result = removeItemsFromFridgeInventory({
+      imageId: image.id,
+      name: "carrots",
+      storageLocation: "fridge",
+    });
+
+    expect(result).toMatchObject({
+      status: "updated",
+      removedItemIds: ["item-1"],
+    });
+    expect(getFridgeInventoryForImage(image.id)?.items).toEqual([]);
+  });
+
+  it("does not remove scanned inventory by broad category alone", () => {
+    const image = createFridgeImage({
+      dataUrl: createJpegDataUrl(),
+      originalName: "fridge.jpg",
+      storageLocation: "fridge",
+      baseImageId: null,
+    });
+    const inventory = createInventory(image.id);
+    inventory.items[0] = {
+      ...inventory.items[0],
+      name: "bagged vegetable",
+      label: "Unlabeled bag",
+      cat: "produce",
+      subcat: null,
+      pack: "bag",
+    };
+    saveFridgeInventory({ imageId: image.id, inventory });
+
+    const result = removeItemsFromFridgeInventory({
+      imageId: image.id,
+      name: "produce",
+      storageLocation: "fridge",
+    });
+
+    expect(result.status).toBe("not_found");
+    expect(getFridgeInventoryForImage(image.id)?.items.map((item) => item.id)).toEqual(["item-1"]);
   });
 });
 

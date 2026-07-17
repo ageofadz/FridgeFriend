@@ -280,6 +280,34 @@ describe("manage_household_inventory", () => {
     expect(Object.keys(limited.items[0]).sort()).toEqual(["id", "name"]);
   });
 
+  it("matches singular household inventory entries from plural consume requests", async () => {
+    const inventoryTool = createManageHouseholdInventoryTool({
+      fridgeId: "fridge-plurals",
+    });
+    const added = await inventoryTool.invoke({
+      operation: "add",
+      name: "Carrot",
+      storageLocation: "fridge",
+      quantity: null,
+      notes: null,
+    });
+
+    const consumed = await inventoryTool.invoke({
+      operation: "consume",
+      name: "carrots",
+      storageLocation: "fridge",
+    });
+
+    expect(consumed).toMatchObject({
+      operation: "consume",
+      status: "ok",
+      item: {
+        id: requireItem(added).id,
+        status: "consumed",
+      },
+    });
+  });
+
   it("persists accepted explicit inventory memory through the bound tool", async () => {
     const fridgeId = "fridge-memory";
     const node = createPersistMemoryNode({

@@ -17,6 +17,7 @@ import {
   DEFAULT_USER_ID,
   withDatabase,
 } from "../sqlite.server";
+import { foodTextMatches } from "../food-text.server";
 import {
   DietaryPreferenceCandidateSchema,
   DietaryRestrictionCandidateSchema,
@@ -528,6 +529,28 @@ function inventorySelectorMessage(operation: HouseholdInventoryOperation["operat
   return `${operation} requires an item id or both name and storageLocation`;
 }
 
+function householdInventoryNameMatches(
+  item: Pick<ExternalInventoryMemory, "name" | "canonicalName">,
+  targetName: string,
+) {
+  return foodTextMatches(item.name, targetName) ||
+    (typeof item.canonicalName === "string" && foodTextMatches(item.canonicalName, targetName));
+}
+
+function selectHouseholdInventoryRowByName(
+  rows: Array<typeof externalInventoryItems.$inferSelect>,
+  storageLocation: StorageLocation,
+  targetName: string,
+) {
+  const matches = rows.filter((item) =>
+    item.storageLocation === storageLocation &&
+    householdInventoryNameMatches(item, targetName)
+  );
+
+  return matches.find((item) => activeInventoryStatuses().has(assertStatus(item.status))) ??
+    matches[0];
+}
+
 export function manageHouseholdInventory(input: {
   fridgeId: string;
   operation: HouseholdInventoryOperation;
@@ -550,7 +573,7 @@ export function manageHouseholdInventory(input: {
         ...(operation.storageLocations ?? []),
       ]);
       const ids = new Set(operation.ids ?? []);
-      const names = new Set((operation.names ?? []).map(normalizeMemoryKey));
+      const names = (operation.names ?? []).map(normalizeMemoryKey);
       const statuses = operation.statuses && operation.statuses.length > 0
         ? new Set(operation.statuses)
         : activeInventoryStatuses();
@@ -571,10 +594,11 @@ export function manageHouseholdInventory(input: {
           return statuses.has(item.status) &&
             (storageLocations.size === 0 || storageLocations.has(item.storageLocation)) &&
             (ids.size === 0 || ids.has(item.id)) &&
-            (names.size === 0 || names.has(canonicalName)) &&
+            (names.length === 0 || names.some((name) => householdInventoryNameMatches(item, name))) &&
             (search === null ||
               canonicalName.includes(search) ||
               normalizeMemoryKey(item.name).includes(search) ||
+              foodTextMatches(item.name, search) ||
               normalizeMemoryKey(item.notes ?? "").includes(search)) &&
             (operation.hasQuantity === undefined ||
               (operation.hasQuantity ? item.quantity !== null : item.quantity === null)) &&
@@ -699,19 +723,15 @@ export function manageHouseholdInventory(input: {
           ),
         )
         .get()
-      : db
-        .select()
-        .from(externalInventoryItems)
-        .where(
-          and(
-            eq(externalInventoryItems.fridgeId, fridgeId),
-            eq(
-              externalInventoryItems.normalizedKey,
-              scopedKey("inventory", operation.storageLocation!, byName!),
-            ),
-          ),
-        )
-        .get();
+      : selectHouseholdInventoryRowByName(
+        db
+          .select()
+          .from(externalInventoryItems)
+          .where(eq(externalInventoryItems.fridgeId, fridgeId))
+          .all(),
+        operation.storageLocation!,
+        byName!,
+      );
 
     if (!existing) {
       const identifier = byId ? `id ${byId}` : `${byName} in ${operation.storageLocation}`;

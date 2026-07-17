@@ -10,6 +10,7 @@ It is based around progressive enrichment: the first scan does not need to under
 ### Docker
 
 ```sh
+7z x demo-corpus/prebuilt-data.7z
 cp .env.example .env
 docker compose up --build
 ```
@@ -25,6 +26,7 @@ Use Node 22.
 Initialize .env with a gemini key. Then:
 
 ```sh
+7z x demo-corpus/prebuilt-data.7z
 npm i
 npm run chroma
 ```
@@ -236,7 +238,7 @@ The query graph uses a `manage_household_inventory` tool for persistent househol
 
 Scanned image inventory is separate. The tool only mutates scanned inventory through explicit server-side update paths when a user-approved correction or removal changes the visible inventory.
 
-The intent detection is interesting - I settled on a hybrid system, where embeddings are used to classify user intent, and below a certain cosine similarity threshhold, we grab the closest nearby candidate intentions and have the LLM choose one.
+For intent detection, I settled on a hybrid system, where embeddings are used to classify user intent, and below a certain cosine similarity threshhold, we grab the closest nearby candidate intentions and have the LLM choose one.
 
 ## What I could improve on
 

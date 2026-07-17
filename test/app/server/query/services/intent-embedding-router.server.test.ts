@@ -13,6 +13,24 @@ function vector(first: number, second: number) {
   return [first, second];
 }
 
+function fullVector(index: number) {
+  return new Array(768).fill(0).map((_, vectorIndex) => vectorIndex === index ? 1 : 0);
+}
+
+function queryRowsFromUpserts(upserts: Array<{
+  ids: string[];
+  documents: string[];
+  metadatas: Array<Record<string, unknown>>;
+}>, distances: number[]) {
+  return upserts.flatMap((upsert) =>
+    upsert.ids.map((_, index) => ({
+      document: upsert.documents[index],
+      metadata: upsert.metadatas[index],
+      distance: distances[index] ?? 1,
+    }))
+  );
+}
+
 describe("intent embedding router", () => {
   it("has ten examples per intent", () => {
     const counts = new Map<string, number>();
@@ -74,12 +92,32 @@ describe("intent embedding router", () => {
   });
 
   it("returns unresolved routing with candidates when embedding confidence is below the direct route margin", async () => {
+    const upserts: Array<{
+      ids: string[];
+      documents: string[];
+      metadatas: Array<Record<string, unknown>>;
+    }> = [];
+    const collection = {
+      handle: {
+        get: async () => ({ ids: [] }),
+        upsert: async (input: {
+          ids: string[];
+          documents: string[];
+          metadatas: Array<Record<string, unknown>>;
+        }) => {
+          upserts.push(input);
+        },
+        query: async () => ({
+          rows: () => [queryRowsFromUpserts(upserts, INTENT_EMBEDDING_EXAMPLES.map(() => 1))],
+        }),
+      },
+    };
     const result = await routeIntentCandidatesByEmbedding(
       { query: "Can you help with this?" },
       {
-        embedDocuments: async () => INTENT_EMBEDDING_EXAMPLES.map((_, index) =>
-          new Array(768).fill(0).map((__, vectorIndex) => vectorIndex === index % 2 ? 1 : 0)),
-        embedQuery: async () => new Array(768).fill(0).map((_, index) => index === 0 ? 1 : 0),
+        embedDocuments: async () => INTENT_EMBEDDING_EXAMPLES.map((_, index) => fullVector(index % 2)),
+        embedQuery: async () => fullVector(0),
+        getCollection: async () => collection as never,
       },
     );
 
@@ -88,15 +126,42 @@ describe("intent embedding router", () => {
   });
 
   it("returns static routing metadata from the matched example", async () => {
+    const upserts: Array<{
+      ids: string[];
+      documents: string[];
+      metadatas: Array<Record<string, unknown>>;
+    }> = [];
+    const collection = {
+      handle: {
+        get: async () => ({ ids: [] }),
+        upsert: async (input: {
+          ids: string[];
+          documents: string[];
+          metadatas: Array<Record<string, unknown>>;
+        }) => {
+          upserts.push(input);
+        },
+        query: async () => ({
+          rows: () => [
+            queryRowsFromUpserts(
+              upserts,
+              INTENT_EMBEDDING_EXAMPLES.map((example) =>
+                example.text === "Make a grocery list for tacos." ? 0 : 2),
+            ),
+          ],
+        }),
+      },
+    };
     const result = await routeIntentByEmbedding(
       { query: "Make a grocery list for tacos." },
       {
         embedDocuments: async (documents) =>
           documents.map((document) =>
             document === "Make a grocery list for tacos."
-              ? new Array(768).fill(0).map((_, index) => index === 0 ? 1 : 0)
-              : new Array(768).fill(0).map((_, index) => index === 1 ? 1 : 0)),
-        embedQuery: async () => new Array(768).fill(0).map((_, index) => index === 0 ? 1 : 0),
+              ? fullVector(0)
+              : fullVector(1)),
+        embedQuery: async () => fullVector(0),
+        getCollection: async () => collection as never,
       },
     );
 
@@ -104,6 +169,60 @@ describe("intent embedding router", () => {
       intent: "shopping",
       shoppingMode: "grocery_planner",
       memoryUpdateRequested: false,
+    });
+  });
+
+  it("does not re-embed intent examples already present in Chroma", async () => {
+    let embedDocumentCalls = 0;
+    const collection = {
+      handle: {
+        get: async (input: { ids: string[] }) => ({ ids: input.ids }),
+        upsert: async () => {
+          throw new Error("upsert should not run when every intent example is already indexed");
+        },
+        query: async () => ({
+          rows: () => [[{
+            document: "Make a grocery list for tacos.",
+            metadata: {
+              documentType: "intent_example",
+              corpusVersion: "2026-07-18",
+              intent: "shopping",
+              exampleIndex: 43,
+              recipeContinuation: false,
+              shoppingMode: "grocery_planner",
+              memoryUpdateRequested: false,
+            },
+            distance: 0,
+          }, {
+            document: "Suggest three dinner ideas with chicken.",
+            metadata: {
+              documentType: "intent_example",
+              corpusVersion: "2026-07-18",
+              intent: "recipe",
+              exampleIndex: 30,
+              recipeContinuation: false,
+              shoppingMode: "direct",
+              memoryUpdateRequested: false,
+            },
+            distance: 1,
+          }]],
+        }),
+      },
+    };
+
+    const result = await routeIntentCandidatesByEmbedding({ query: "Make a grocery list for tacos." }, {
+      embedDocuments: async () => {
+        embedDocumentCalls += 1;
+        return [];
+      },
+      embedQuery: async () => fullVector(0),
+      getCollection: async () => collection as never,
+    });
+
+    expect(embedDocumentCalls).toBe(0);
+    expect(result.accepted).toMatchObject({
+      intent: "shopping",
+      shoppingMode: "grocery_planner",
     });
   });
 });

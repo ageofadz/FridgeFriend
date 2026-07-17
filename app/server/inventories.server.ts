@@ -7,6 +7,7 @@ import {
   type Inventory,
   type InventoryEnrichment,
 } from "./scan/schemas/inventory";
+import { foodTextMatches, normalizeFoodText } from "./food-text.server";
 import { withDatabase } from "./sqlite.server";
 import type { StorageImageLocation } from "../workspace/contracts";
 import type { StorageLocation } from "./memory/schemas";
@@ -270,42 +271,6 @@ export function applyFridgeInventorySplit(input: {
   });
 }
 
-function normalizedInventoryText(value: string) {
-  return value
-    .normalize("NFKC")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function normalizedInventoryTokens(value: string) {
-  return normalizedInventoryText(value)
-    .split(" ")
-    .map((token) => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token)
-    .filter(Boolean);
-}
-
-function tokenSetIncludesAll(container: Set<string>, tokens: string[]) {
-  return tokens.length > 0 && tokens.every((token) => container.has(token));
-}
-
-function inventoryTextMatches(itemValue: string, targetValue: string) {
-  const itemText = normalizedInventoryText(itemValue);
-  const targetText = normalizedInventoryText(targetValue);
-
-  if (itemText === targetText) {
-    return true;
-  }
-
-  const itemTokens = normalizedInventoryTokens(itemText);
-  const targetTokens = normalizedInventoryTokens(targetText);
-  const itemTokenSet = new Set(itemTokens);
-  const targetTokenSet = new Set(targetTokens);
-
-  return tokenSetIncludesAll(itemTokenSet, targetTokens) ||
-    tokenSetIncludesAll(targetTokenSet, itemTokens);
-}
-
 function storageLocationMatchesZoneType(
   storageLocation: StorageLocation,
   zoneType: Inventory["items"][number]["loc"]["zoneType"],
@@ -319,6 +284,16 @@ function storageLocationMatchesZoneType(
   }
 
   return zoneType === storageLocation;
+}
+
+function scannedInventoryItemMatches(item: Inventory["items"][number], targetName: string) {
+  return [
+    item.name,
+    item.label,
+    item.subcat,
+    item.attrs.brand,
+    item.attrs.variant,
+  ].some((value) => typeof value === "string" && foodTextMatches(value, targetName));
 }
 
 export function removeItemsFromFridgeInventory(input: {
@@ -338,15 +313,12 @@ export function removeItemsFromFridgeInventory(input: {
     };
   }
 
-  const targetName = normalizedInventoryText(input.name);
+  const targetName = normalizeFoodText(input.name);
   const matchingItemIds = new Set(
     inventory.items
       .filter((item) =>
         storageLocationMatchesZoneType(input.storageLocation, item.loc.zoneType) &&
-        (
-          inventoryTextMatches(item.name, targetName) ||
-          inventoryTextMatches(item.label, targetName)
-        )
+        scannedInventoryItemMatches(item, targetName)
       )
       .map((item) => item.id),
   );

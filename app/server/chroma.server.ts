@@ -10,6 +10,7 @@ const DEFAULT_CHROMA_DATABASE = "default_database";
 
 const MEMORY_COLLECTION_NAME = "fridgefriend_memory";
 const RECIPE_COLLECTION_NAME = "fridgefriend_recipes";
+const INTENT_EXAMPLE_COLLECTION_NAME = "fridgefriend_intent_examples";
 
 function createChromaClient(url: string) {
   try {
@@ -120,4 +121,8 @@ export async function getMemoryCollection() {
 
 export async function getRecipeCollection() {
   return getCollection(RECIPE_COLLECTION_NAME);
+}
+
+export async function getIntentExampleCollection() {
+  return getCollection(INTENT_EXAMPLE_COLLECTION_NAME);
 }

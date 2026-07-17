@@ -1,11 +1,14 @@
+import { createHash } from "node:crypto";
+
 import {
   GoogleGenerativeAI,
   TaskType,
   type BatchEmbedContentsRequest,
   type EmbedContentRequest,
 } from "@google/generative-ai";
+import type { Metadata, Where } from "chromadb";
 
-import { normalizeEmbedding } from "../../chroma.server";
+import { getIntentExampleCollection, normalizeEmbedding } from "../../chroma.server";
 import { requiredEnv } from "../../env.server";
 import type {
   EnrichmentRequirement,
@@ -17,6 +20,7 @@ const INTENT_EMBEDDING_MODEL = "gemini-embedding-001";
 const INTENT_EMBEDDING_DIMENSIONS = 768;
 const INTENT_EMBEDDING_ACCEPTANCE_THRESHOLD = 0.62;
 const INTENT_EMBEDDING_ACCEPTANCE_MARGIN = 0.035;
+const INTENT_EXAMPLE_CORPUS_VERSION = "2026-07-18";
 
 type ShoppingMode = IntentResponse["shoppingMode"];
 
@@ -36,6 +40,7 @@ export type IntentEmbeddingRecord = IntentEmbeddingExample & {
 type IntentEmbeddingDependencies = {
   embedDocuments?: (documents: string[]) => Promise<number[][]>;
   embedQuery?: (query: string) => Promise<number[]>;
+  getCollection?: () => Promise<IntentExampleCollection>;
 };
 
 export type IntentEmbeddingRouteCandidate = {
@@ -51,6 +56,47 @@ export type IntentEmbeddingRoutingResult = {
 };
 
 const emptyEnrichment: EnrichmentRequirement = { itemNames: [], fields: [] };
+
+type IntentExampleMetadata = Metadata & {
+  documentType: "intent_example";
+  corpusVersion: string;
+  intent: QueryIntent;
+  exampleIndex: number;
+  recipeContinuation: boolean;
+  shoppingMode: ShoppingMode;
+  memoryUpdateRequested: boolean;
+};
+
+type IntentExampleCollectionHandle = {
+  get(input: {
+    ids: string[];
+    include: [];
+  }): Promise<{
+    ids: string[];
+  }>;
+  upsert(input: {
+    ids: string[];
+    embeddings: number[][];
+    documents: string[];
+    metadatas: IntentExampleMetadata[];
+  }): Promise<void>;
+  query<TMetadata extends Metadata>(input: {
+    queryEmbeddings: number[][];
+    nResults: number;
+    where: Where;
+    include: ["documents", "metadatas", "distances"];
+  }): Promise<{
+    rows(): Array<Array<{
+      document?: string | null;
+      metadata?: TMetadata | null;
+      distance?: number | null;
+    }>>;
+  }>;
+};
+
+type IntentExampleCollection = {
+  handle: IntentExampleCollectionHandle;
+};
 
 export const INTENT_EMBEDDING_EXAMPLES: IntentEmbeddingExample[] = [
   { intent: "inventory", text: "How many eggs are in my fridge?" },
@@ -172,8 +218,6 @@ type IntentBatchEmbedContentsRequest = BatchEmbedContentsRequest & {
   requests: IntentEmbedContentRequest[];
 };
 
-let embeddedExamplesPromise: Promise<IntentEmbeddingRecord[]> | null = null;
-
 function createIntentEmbeddings() {
   const model = new GoogleGenerativeAI(requiredEnv("GOOGLE_API_KEY")).getGenerativeModel({
     model: INTENT_EMBEDDING_MODEL,
@@ -217,19 +261,6 @@ function dotProduct(left: number[], right: number[]) {
   return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
 }
 
-async function embeddedExamples(dependencies: IntentEmbeddingDependencies = {}) {
-  if (dependencies.embedDocuments) {
-    const vectors = await dependencies.embedDocuments(INTENT_EMBEDDING_EXAMPLES.map((example) => example.text));
-    return recordsFromVectors(vectors);
-  }
-
-  embeddedExamplesPromise ??= createIntentEmbeddings()
-    .embedDocuments(INTENT_EMBEDDING_EXAMPLES.map((example) => example.text))
-    .then(recordsFromVectors);
-
-  return embeddedExamplesPromise;
-}
-
 function recordsFromVectors(vectors: number[][]) {
   if (vectors.length !== INTENT_EMBEDDING_EXAMPLES.length) {
     throw new Error(`Intent example embedding returned ${vectors.length} vectors for ${INTENT_EMBEDDING_EXAMPLES.length} examples`);
@@ -239,6 +270,132 @@ function recordsFromVectors(vectors: number[][]) {
     ...INTENT_EMBEDDING_EXAMPLES[index],
     embedding: normalizeIntentEmbedding(embedding, `Intent example ${index + 1}`),
   }));
+}
+
+function collectionLoader(dependencies: IntentEmbeddingDependencies) {
+  return dependencies.getCollection ?? (getIntentExampleCollection as () => Promise<IntentExampleCollection>);
+}
+
+function intentExampleId(example: IntentEmbeddingExample, index: number) {
+  const hash = createHash("sha256")
+    .update(JSON.stringify({
+      corpusVersion: INTENT_EXAMPLE_CORPUS_VERSION,
+      example,
+      index,
+    }))
+    .digest("hex")
+    .slice(0, 16);
+
+  return `intent-example:${INTENT_EXAMPLE_CORPUS_VERSION}:${index}:${hash}`;
+}
+
+function metadataForIntentExample(example: IntentEmbeddingExample, index: number): IntentExampleMetadata {
+  return {
+    documentType: "intent_example",
+    corpusVersion: INTENT_EXAMPLE_CORPUS_VERSION,
+    intent: example.intent,
+    exampleIndex: index,
+    recipeContinuation: example.recipeContinuation ?? false,
+    shoppingMode: example.shoppingMode ?? "direct",
+    memoryUpdateRequested: example.memoryUpdateRequested ?? false,
+  };
+}
+
+function intentExamplesWhere(): Where {
+  return {
+    $and: [
+      { documentType: "intent_example" },
+      { corpusVersion: INTENT_EXAMPLE_CORPUS_VERSION },
+    ],
+  };
+}
+
+async function indexMissingIntentExamples(
+  collection: IntentExampleCollection,
+  embeddings: Pick<ReturnType<typeof createIntentEmbeddings>, "embedDocuments">,
+) {
+  const ids = INTENT_EMBEDDING_EXAMPLES.map(intentExampleId);
+  const existing = await collection.handle.get({ ids, include: [] });
+  const existingIds = new Set(existing.ids);
+  const missing = INTENT_EMBEDDING_EXAMPLES
+    .map((example, index) => ({ example, index, id: ids[index] ?? intentExampleId(example, index) }))
+    .filter(({ id }) => !existingIds.has(id));
+
+  if (missing.length === 0) {
+    return;
+  }
+
+  const documents = missing.map(({ example }) => example.text);
+  const vectors = await embeddings.embedDocuments(documents);
+
+  if (vectors.length !== missing.length) {
+    throw new Error(`Intent example embedding returned ${vectors.length} vectors for ${missing.length} missing examples`);
+  }
+
+  await collection.handle.upsert({
+    ids: missing.map(({ id }) => id),
+    embeddings: vectors.map((vector, index) => normalizeIntentEmbedding(vector, `Intent example ${missing[index]?.index ?? index + 1}`)),
+    documents,
+    metadatas: missing.map(({ example, index }) => metadataForIntentExample(example, index)),
+  });
+}
+
+function similarityFromDistance(distance: number) {
+  return 1 / (1 + Math.max(distance, 0));
+}
+
+function intentExampleFromMetadata(document: string, metadata: IntentExampleMetadata): IntentEmbeddingExample {
+  return {
+    intent: metadata.intent,
+    text: document,
+    recipeContinuation: metadata.recipeContinuation,
+    shoppingMode: metadata.shoppingMode,
+    memoryUpdateRequested: metadata.memoryUpdateRequested,
+  };
+}
+
+function intentExampleCandidatesFromRows(rows: Array<{
+  document?: string | null;
+  metadata?: IntentExampleMetadata | null;
+  distance?: number | null;
+}>) {
+  const bestByIntent = new Map<QueryIntent, IntentEmbeddingRouteCandidate>();
+
+  for (const row of rows) {
+    const metadata = row.metadata;
+    const document = row.document;
+    const distance = row.distance;
+
+    if (!metadata || metadata.documentType !== "intent_example" || metadata.corpusVersion !== INTENT_EXAMPLE_CORPUS_VERSION) {
+      throw new Error("Chroma returned an intent example without valid metadata");
+    }
+
+    if (!document) {
+      throw new Error("Chroma returned an intent example without a document");
+    }
+
+    if (distance === null || distance === undefined || !Number.isFinite(distance)) {
+      throw new Error("Chroma returned an intent example without a valid distance");
+    }
+
+    const score = similarityFromDistance(distance);
+    const current = bestByIntent.get(metadata.intent);
+
+    if (!current || score > current.score) {
+      bestByIntent.set(metadata.intent, {
+        intent: metadata.intent,
+        score,
+        margin: 0,
+        example: intentExampleFromMetadata(document, metadata),
+      });
+    }
+  }
+
+  const ranked = [...bestByIntent.values()].sort((left, right) => right.score - left.score);
+  return ranked.map((candidate, index) => ({
+    ...candidate,
+    margin: candidate.score - (ranked[index + 1]?.score ?? 0),
+  })).slice(0, 3);
 }
 
 export function selectIntentEmbeddingRoute(
@@ -309,13 +466,22 @@ export async function routeIntentCandidatesByEmbedding(
         embedDocuments: dependencies.embedDocuments,
       }
       : createIntentEmbeddings();
-    const [queryEmbedding, examples] = await Promise.all([
-      embeddings.embedQuery(input.query),
-      embeddedExamples(dependencies),
-    ]);
+    const collection = await collectionLoader(dependencies)();
+    await indexMissingIntentExamples(collection, embeddings);
+    const queryEmbedding = await embeddings.embedQuery(input.query);
     const normalizedQueryEmbedding = normalizeIntentEmbedding(queryEmbedding, "Intent query");
-    const candidates = selectIntentEmbeddingRouteCandidates(normalizedQueryEmbedding, examples);
-    const match = selectIntentEmbeddingRoute(normalizedQueryEmbedding, examples);
+    const results = await collection.handle.query<IntentExampleMetadata>({
+      queryEmbeddings: [normalizedQueryEmbedding],
+      nResults: INTENT_EMBEDDING_EXAMPLES.length,
+      where: intentExamplesWhere(),
+      include: ["documents", "metadatas", "distances"],
+    });
+    const candidates = intentExampleCandidatesFromRows(results.rows()[0] ?? []);
+    const match = candidates[0] &&
+        candidates[0].score >= INTENT_EMBEDDING_ACCEPTANCE_THRESHOLD &&
+        candidates[0].margin >= INTENT_EMBEDDING_ACCEPTANCE_MARGIN
+      ? candidates[0]
+      : null;
 
     return {
       accepted: match ? intentResponseFromCandidate(match) : null,
