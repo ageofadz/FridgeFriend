@@ -5,12 +5,19 @@ import {
 } from "@google/generative-ai";
 import type { Metadata, Where } from "chromadb";
 
-import { getMemoryCollection } from "../chroma.server";
+import { getMemoryCollection, normalizeEmbedding } from "../chroma.server";
 import { requiredEnv } from "../env.server";
 import type { SemanticMemory } from "./schemas";
 
-const MEMORY_EMBEDDING_MODEL = "gemini-embedding-2";
-const MEMORY_EMBEDDING_DIMENSIONS = 768;
+// gemini-embedding-001 is the valid Gemini embedding model (the previously
+// configured "gemini-embedding-2" does not exist). We keep 768 dimensions — a
+// supported Matryoshka output size requested via outputDimensionality — so
+// existing `fridgefriend_memory` collections indexed with 768-dim vectors stay
+// compatible; a Chroma collection's dimensionality is fixed by its first
+// insert. Truncated (non-3072) gemini-embedding-001 vectors are not
+// unit-length, so we L2-normalize them before indexing and querying.
+const MEMORY_EMBEDDING_MODEL = "gemini-embedding-001";
+export const MEMORY_EMBEDDING_DIMENSIONS = 768;
 
 type MemoryEmbedContentRequest = EmbedContentRequest & {
   outputDimensionality: number;
@@ -32,42 +39,65 @@ export type SemanticMemorySearchInput = {
   limit: number;
 };
 
-function createMemoryEmbeddingModel() {
-  return new GoogleGenerativeAI(requiredEnv("GOOGLE_API_KEY")).getGenerativeModel({
+type MemoryCollectionHandle = {
+  upsert(input: {
+    ids: string[];
+    embeddings: number[][];
+    documents: string[];
+    metadatas: MemoryMetadata[];
+  }): Promise<void>;
+  query<TMetadata extends Metadata>(input: {
+    queryEmbeddings: number[][];
+    nResults: number;
+    where: Where;
+    include: ["metadatas", "distances"];
+  }): Promise<{
+    rows(): Array<Array<{
+      metadata?: TMetadata | null;
+      distance?: number | null;
+    }>>;
+  }>;
+};
+
+type MemoryCollection = {
+  handle: MemoryCollectionHandle;
+};
+
+export type MemoryVectorStoreDependencies = {
+  embedText?: (text: string, taskType: TaskType) => Promise<number[] | undefined>;
+  getCollection?: () => Promise<MemoryCollection>;
+};
+
+function createMemoryEmbedder() {
+  const model = new GoogleGenerativeAI(requiredEnv("GOOGLE_API_KEY")).getGenerativeModel({
     model: MEMORY_EMBEDDING_MODEL,
   });
-}
 
-function memoryEmbeddingRequest(
-  text: string,
-  taskType: TaskType,
-): MemoryEmbedContentRequest {
-  return {
-    content: { role: "user", parts: [{ text: text.replace(/\n/g, " ") }] },
-    taskType,
-    outputDimensionality: MEMORY_EMBEDDING_DIMENSIONS,
+  return async (text: string, taskType: TaskType) => {
+    const request: MemoryEmbedContentRequest = {
+      content: { role: "user", parts: [{ text: text.replace(/\n/g, " ") }] },
+      taskType,
+      outputDimensionality: MEMORY_EMBEDDING_DIMENSIONS,
+    };
+    const response = await model.embedContent(request);
+    return response.embedding.values;
   };
 }
 
-function assertMemoryEmbedding(values: number[] | undefined, label: string) {
-  if (!values) {
-    throw new Error(`${label} embedding response did not include vector values`);
-  }
-
-  if (values.length !== MEMORY_EMBEDDING_DIMENSIONS) {
-    throw new Error(
-      `${label} embedding returned ${values.length} dimensions; expected ${MEMORY_EMBEDDING_DIMENSIONS}`,
-    );
-  }
-
-  return values;
+function collectionLoader(dependencies: MemoryVectorStoreDependencies) {
+  return dependencies.getCollection ?? (getMemoryCollection as () => Promise<MemoryCollection>);
 }
 
-async function embedMemoryText(text: string, taskType: TaskType, label: string) {
-  const model = createMemoryEmbeddingModel();
-  const response = await model.embedContent(memoryEmbeddingRequest(text, taskType));
+async function embedMemoryText(
+  text: string,
+  taskType: TaskType,
+  label: string,
+  dependencies: MemoryVectorStoreDependencies,
+) {
+  const embedText = dependencies.embedText ?? createMemoryEmbedder();
+  const values = await embedText(text, taskType);
 
-  return assertMemoryEmbedding(response.embedding.values, label);
+  return normalizeEmbedding(values, MEMORY_EMBEDDING_DIMENSIONS, label);
 }
 
 function metadataForMemory(memory: SemanticMemory): MemoryMetadata {
@@ -81,14 +111,18 @@ function metadataForMemory(memory: SemanticMemory): MemoryMetadata {
   };
 }
 
-export async function indexSemanticMemory(memory: SemanticMemory) {
+export async function indexSemanticMemory(
+  memory: SemanticMemory,
+  dependencies: MemoryVectorStoreDependencies = {},
+) {
   try {
     const embedding = await embedMemoryText(
       memory.content,
       TaskType.RETRIEVAL_DOCUMENT,
       `Memory ${memory.id}`,
+      dependencies,
     );
-    const collection = await getMemoryCollection();
+    const collection = await collectionLoader(dependencies)();
 
     await collection.handle.upsert({
       ids: [memory.id],
@@ -102,18 +136,25 @@ export async function indexSemanticMemory(memory: SemanticMemory) {
   }
 }
 
-function scopeWhere(scopeType: "user" | "fridge", scopeId: string): Where {
+function scopeWhere(input: Pick<SemanticMemorySearchInput, "userId" | "fridgeId">): Where {
   return {
     $and: [
       { documentType: "memory" },
-      { scopeType },
-      { scopeId },
       { active: true },
+      {
+        $or: [
+          { scopeType: "user", scopeId: input.userId },
+          { scopeType: "fridge", scopeId: input.fridgeId },
+        ],
+      },
     ],
   };
 }
 
-export async function searchSemanticMemoryIds(input: SemanticMemorySearchInput) {
+export async function searchSemanticMemoryIds(
+  input: SemanticMemorySearchInput,
+  dependencies: MemoryVectorStoreDependencies = {},
+) {
   const query = input.query.trim();
 
   if (query.length === 0) {
@@ -121,36 +162,23 @@ export async function searchSemanticMemoryIds(input: SemanticMemorySearchInput) 
   }
 
   try {
-    const collection = await getMemoryCollection();
-    const memoryVectorCount = await collection.handle.count();
-
-    if (memoryVectorCount === 0) {
-      return [];
-    }
-
+    const collection = await collectionLoader(dependencies)();
     const queryEmbedding = await embedMemoryText(
       query,
       TaskType.RETRIEVAL_QUERY,
       "Memory query",
+      dependencies,
     );
-    const [userResults, fridgeResults] = await Promise.all([
-      collection.handle.query<MemoryMetadata>({
-        queryEmbeddings: [queryEmbedding],
-        nResults: input.limit,
-        where: scopeWhere("user", input.userId),
-        include: ["metadatas", "distances"],
-      }),
-      collection.handle.query<MemoryMetadata>({
-        queryEmbeddings: [queryEmbedding],
-        nResults: input.limit,
-        where: scopeWhere("fridge", input.fridgeId),
-        include: ["metadatas", "distances"],
-      }),
-    ]);
+    const results = await collection.handle.query<MemoryMetadata>({
+      queryEmbeddings: [queryEmbedding],
+      nResults: input.limit,
+      where: scopeWhere(input),
+      include: ["metadatas", "distances"],
+    });
 
     const seen = new Set<string>();
 
-    return [...userResults.rows()[0], ...fridgeResults.rows()[0]]
+    return [...results.rows()[0] ?? []]
       .sort((left, right) => (left.distance ?? 0) - (right.distance ?? 0))
       .flatMap((row) => {
         const memoryId = row.metadata?.memoryId;
@@ -166,35 +194,5 @@ export async function searchSemanticMemoryIds(input: SemanticMemorySearchInput) 
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Memory Chroma search failed: ${message}`);
-  }
-}
-
-export async function clearMemoryEmbeddings() {
-  try {
-    const collection = await getMemoryCollection();
-    const beforeCount = await collection.handle.count();
-
-    if (beforeCount === 0) {
-      return {
-        deletedCount: 0,
-        remainingCount: 0,
-      };
-    }
-
-    await collection.handle.delete({
-      where: {
-        documentType: "memory",
-      },
-    });
-
-    const remainingCount = await collection.handle.count();
-
-    return {
-      deletedCount: beforeCount - remainingCount,
-      remainingCount,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Memory Chroma clear failed: ${message}`);
   }
 }

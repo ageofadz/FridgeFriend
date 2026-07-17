@@ -25,7 +25,8 @@ function phrases(value: string) {
 }
 
 export function resolveFoodComTags(terms: string[], catalog: string[]) {
-  const catalogSet = new Set(catalog.map(normalizeRecipeTag).filter(Boolean));
+  const normalizedCatalog = [...new Set(catalog.map(normalizeRecipeTag).filter(Boolean))];
+  const catalogSet = new Set(normalizedCatalog);
   const resolved = new Set<string>();
 
   for (const term of terms) {
@@ -37,6 +38,7 @@ export function resolveFoodComTags(terms: string[], catalog: string[]) {
 
       if (catalogSet.has(phrase)) {
         resolved.add(phrase);
+        continue;
       }
     }
   }

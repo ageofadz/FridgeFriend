@@ -1,0 +1,54 @@
+name: fridgefriend
+
+services:
+  init-data:
+    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    command: ["node", "scripts/initialize-prebuilt-demo-data.mjs"]
+    environment:
+      DEMO_APP_DATA_PATH: /var/lib/fridgefriend/app
+      DEMO_CHROMA_DATA_PATH: /var/lib/fridgefriend/chroma
+      PREBUILT_DATA_PATH: /app/prebuilt-data
+    volumes:
+      - app-data:/var/lib/fridgefriend/app
+      - chroma-data:/var/lib/fridgefriend/chroma
+    restart: "no"
+
+  chroma:
+    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    command: ["npm", "run", "chroma"]
+    environment:
+      CHROMA_HOST: 0.0.0.0
+      CHROMA_PATH: /var/lib/fridgefriend/chroma
+      CHROMA_PORT: "8000"
+    volumes:
+      - chroma-data:/var/lib/fridgefriend/chroma
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/v2/heartbeat').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  app:
+    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    command: ["npm", "run", "start"]
+    environment:
+      CHROMA_URL: http://chroma:8000
+      DATABASE_PATH: /var/lib/fridgefriend/app/fridgefriend.sqlite
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?GOOGLE_API_KEY is required to run FridgeFriend}
+      HOST: 0.0.0.0
+      PORT: "3000"
+    depends_on:
+      chroma:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes:
+      - app-data:/var/lib/fridgefriend/app
+
+volumes:
+  app-data:
+  chroma-data:

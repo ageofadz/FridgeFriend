@@ -6,17 +6,20 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { sql } from "drizzle-orm";
 
 import { optionalEnv } from "./env.server";
+import { canonicalizeInventoryPlacement } from "../components/fridge-placement";
 import { Inventory as InventorySchema } from "./scan/schemas/inventory";
 import {
-  appFoundation,
   dietaryPreferences,
   dietaryRestrictions,
   externalInventoryItems,
   foodComRecipeIngredients,
   foodComRecipes,
   foodComRecipeTags,
+  fridgeChatMessages,
+  fridgeChatThreads,
   fridgeImages,
   fridgeInventories,
+  kitchenOrganizationPlans,
   fridgeMemberships,
   fridges,
   goals,
@@ -24,7 +27,7 @@ import {
   users,
 } from "./db/schema.server";
 
-export type SqliteBootstrapResult = {
+type SqliteBootstrapResult = {
   path: string;
   tables: string[];
 };
@@ -34,6 +37,27 @@ export const DEFAULT_FRIDGE_ID = "default-fridge";
 
 export function getDatabasePath() {
   return optionalEnv("DATABASE_PATH") ?? ".data/fridgefriend.sqlite";
+}
+
+const bootstrappedDatabasePaths = new Set<string>();
+
+export function resetSqliteBootstrapCacheForTests() {
+  bootstrappedDatabasePaths.clear();
+}
+
+function ensureSchemaBootstrapped(
+  db: ReturnType<typeof drizzle>,
+  sqlite: Database.Database,
+  databasePath: string,
+) {
+  const resolvedPath = path.resolve(databasePath);
+
+  if (bootstrappedDatabasePaths.has(resolvedPath)) {
+    return;
+  }
+
+  bootstrapSchema(db, sqlite, databasePath);
+  bootstrappedDatabasePaths.add(resolvedPath);
 }
 
 function openSqlite() {
@@ -61,7 +85,7 @@ export function withDatabase<T>(
   const { databasePath, sqlite, db } = openSqlite();
 
   try {
-    bootstrapSchema(db, sqlite, databasePath);
+    ensureSchemaBootstrapped(db, sqlite, databasePath);
     return callback(db, sqlite);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -292,17 +316,22 @@ function migrateLegacyInventoryRows(sqlite: Database.Database, databasePath: str
           row.image_id,
         );
 
-        if (!migratedCurrentInventory.changed) {
-          continue;
-        }
-
         const parsed = InventorySchema.safeParse(migratedCurrentInventory.inventory);
 
         if (!parsed.success) {
           throw new Error(`Inventory migration failed for image ${row.image_id}: ${parsed.error.message}`);
         }
 
-        update.run(JSON.stringify(parsed.data), new Date().toISOString(), row.image_id);
+        const placedInventory = canonicalizeInventoryPlacement(parsed.data);
+
+        if (
+          !migratedCurrentInventory.changed &&
+          JSON.stringify(parsed.data) === JSON.stringify(placedInventory)
+        ) {
+          continue;
+        }
+
+        update.run(JSON.stringify(placedInventory), new Date().toISOString(), row.image_id);
         continue;
       }
 
@@ -359,7 +388,9 @@ function migrateLegacyInventoryRows(sqlite: Database.Database, databasePath: str
         throw new Error(`Inventory migration failed for image ${row.image_id}: ${parsed.error.message}`);
       }
 
-      update.run(JSON.stringify(parsed.data), new Date().toISOString(), row.image_id);
+      const placedInventory = canonicalizeInventoryPlacement(parsed.data);
+
+      update.run(JSON.stringify(placedInventory), new Date().toISOString(), row.image_id);
     }
   });
 
@@ -377,14 +408,6 @@ function bootstrapSchema(
   databasePath: string,
 ) {
   try {
-    db.run(sql`
-      create table if not exists ${appFoundation} (
-        key text primary key,
-        value text not null,
-        updated_at text not null
-      )
-    `);
-
     db.run(sql`
       create table if not exists ${fridgeImages} (
         id text primary key,
@@ -413,6 +436,61 @@ function bootstrapSchema(
         updated_at text not null,
         foreign key (image_id) references fridge_images(id) on delete cascade
       )
+    `);
+
+    db.run(sql`
+      create table if not exists ${kitchenOrganizationPlans} (
+        id text primary key,
+        request_id text not null unique,
+        user_id text not null,
+        fridge_id text not null,
+        image_id text not null,
+        inventory_fingerprint text not null,
+        status text not null,
+        plan_json text not null,
+        created_at text not null,
+        completed_at text
+      )
+    `);
+
+    db.run(sql`
+      create index if not exists kitchen_organization_plans_fridge_status_idx
+      on kitchen_organization_plans(fridge_id, status)
+    `);
+
+    db.run(sql`
+      create table if not exists ${fridgeChatThreads} (
+        id text primary key,
+        user_id text not null,
+        fridge_id text not null,
+        image_id text,
+        execution_status text not null,
+        created_at text not null,
+        updated_at text not null
+      )
+    `);
+
+    db.run(sql`
+      create index if not exists fridge_chat_threads_scope_idx
+      on fridge_chat_threads(user_id, fridge_id, image_id, updated_at desc)
+    `);
+
+    db.run(sql`
+      create table if not exists ${fridgeChatMessages} (
+        id text primary key,
+        thread_id text not null,
+        role text not null,
+        payload_json text not null,
+        status text not null,
+        created_at text not null,
+        updated_at text not null,
+        foreign key (thread_id) references fridge_chat_threads(id) on delete cascade
+      )
+    `);
+
+    db.run(sql`
+      create index if not exists fridge_chat_messages_thread_idx
+      on fridge_chat_messages(thread_id, created_at)
     `);
 
     migrateLegacyInventoryRows(sqlite, databasePath);
@@ -642,6 +720,7 @@ export function bootstrapSqlite(): SqliteBootstrapResult {
 
   try {
     bootstrapSchema(db, sqlite, databasePath);
+    bootstrappedDatabasePaths.add(path.resolve(databasePath));
 
     const tables = db
       .all<{ name: string }>(sql`

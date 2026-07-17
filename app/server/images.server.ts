@@ -4,14 +4,17 @@ import { desc, eq } from "drizzle-orm";
 
 import { fridgeImages, fridgeInventories } from "./db/schema.server";
 import { withDatabase } from "./sqlite.server";
+import {
+  STORAGE_IMAGE_LOCATIONS,
+  type StorageImageLocation,
+} from "../workspace/contracts";
 
 const JPEG_DATA_URL_PREFIX = "data:image/jpeg;base64,";
-const STORAGE_IMAGE_LOCATIONS = ["fridge", "freezer", "pantry"] as const;
 
 export type FridgeImage = typeof fridgeImages.$inferSelect;
-export type StorageImageLocation = typeof STORAGE_IMAGE_LOCATIONS[number];
+export type { StorageImageLocation };
 
-export function assertJpegDataUrl(dataUrl: string) {
+function assertJpegDataUrl(dataUrl: string) {
   if (!dataUrl.startsWith(JPEG_DATA_URL_PREFIX)) {
     throw new Error("Uploaded storage image must be a JPEG data URL");
   }

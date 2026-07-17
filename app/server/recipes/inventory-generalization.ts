@@ -99,20 +99,24 @@ function isGenericNonIngredient(value: string) {
 
 export function generalRecipeIngredientName(value: string): string | null {
   const withoutPackaging = withoutPackagingWords(value);
+
+  // Labels made up entirely of packaging/color words (for example "green
+  // bottle") describe containers, not food, so they never map to a recipe
+  // ingredient.
+  if (isGenericNonIngredient(withoutPackaging || value)) {
+    return null;
+  }
+
   const suffix = knownIngredientSuffix(withoutPackaging || value);
 
   if (suffix) {
     return suffix;
   }
 
-  if (isGenericNonIngredient(withoutPackaging || value)) {
-    return null;
-  }
-
-  return null;
+  return withoutPackaging || null;
 }
 
-export function categoryForRecipeIngredient(
+function categoryForRecipeIngredient(
   ingredient: string | null,
   label: string,
   packaging: InventoryItem["pack"],

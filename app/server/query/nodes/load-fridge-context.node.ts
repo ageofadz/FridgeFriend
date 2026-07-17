@@ -20,11 +20,6 @@ export function createLoadFridgeContextNode(deps: QueryGraphDependencies) {
         ...state.context,
         fridgeId: state.fridgeId,
         imageId: state.imageId,
-        externalInventory: memoryContext.externalInventory,
-        dietaryRestrictions: memoryContext.dietaryRestrictions,
-        dietaryPreferences: memoryContext.dietaryPreferences,
-        activeGoals: memoryContext.activeGoals,
-        semanticMemories: memoryContext.semanticMemories,
       },
     };
   };

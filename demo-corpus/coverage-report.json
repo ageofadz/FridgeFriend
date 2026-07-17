@@ -1,0 +1,442 @@
+{
+  "candidates": 207206,
+  "count": 5000,
+  "coverage": [
+    {
+      "available": 182,
+      "dimension": "dietary",
+      "label": "dairy_free",
+      "selected": 60,
+      "target": 60
+    },
+    {
+      "available": 221,
+      "dimension": "cuisine",
+      "label": "korean",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 299,
+      "dimension": "cuisine",
+      "label": "portuguese",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 320,
+      "dimension": "cuisine",
+      "label": "vietnamese",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 344,
+      "dimension": "cuisine",
+      "label": "polish",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 433,
+      "dimension": "method",
+      "label": "slow cook",
+      "selected": 100,
+      "target": 100
+    },
+    {
+      "available": 788,
+      "dimension": "cuisine",
+      "label": "japanese",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 975,
+      "dimension": "cuisine",
+      "label": "spanish",
+      "selected": 81,
+      "target": 80
+    },
+    {
+      "available": 1127,
+      "dimension": "cuisine",
+      "label": "thai",
+      "selected": 82,
+      "target": 80
+    },
+    {
+      "available": 1470,
+      "dimension": "method",
+      "label": "stir fry",
+      "selected": 100,
+      "target": 100
+    },
+    {
+      "available": 1493,
+      "dimension": "cuisine",
+      "label": "caribbean",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 1827,
+      "dimension": "cuisine",
+      "label": "chinese",
+      "selected": 91,
+      "target": 80
+    },
+    {
+      "available": 1880,
+      "dimension": "cuisine",
+      "label": "middle_eastern",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 2006,
+      "dimension": "cuisine",
+      "label": "french",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 2181,
+      "dimension": "cuisine",
+      "label": "greek",
+      "selected": 81,
+      "target": 80
+    },
+    {
+      "available": 2473,
+      "dimension": "cuisine",
+      "label": "indian",
+      "selected": 80,
+      "target": 80
+    },
+    {
+      "available": 2647,
+      "dimension": "cuisine",
+      "label": "african",
+      "selected": 83,
+      "target": 80
+    },
+    {
+      "available": 4973,
+      "dimension": "method",
+      "label": "steam",
+      "selected": 125,
+      "target": 100
+    },
+    {
+      "available": 5127,
+      "dimension": "dietary",
+      "label": "gluten_free",
+      "selected": 193,
+      "target": 60
+    },
+    {
+      "available": 5940,
+      "dimension": "cuisine",
+      "label": "mexican",
+      "selected": 180,
+      "target": 80
+    },
+    {
+      "available": 6107,
+      "dimension": "method",
+      "label": "broil",
+      "selected": 144,
+      "target": 100
+    },
+    {
+      "available": 6687,
+      "dimension": "course",
+      "label": "snack",
+      "selected": 162,
+      "target": 80
+    },
+    {
+      "available": 6727,
+      "dimension": "cuisine",
+      "label": "italian",
+      "selected": 196,
+      "target": 80
+    },
+    {
+      "available": 7388,
+      "dimension": "method",
+      "label": "roast",
+      "selected": 181,
+      "target": 100
+    },
+    {
+      "available": 9078,
+      "dimension": "dietary",
+      "label": "vegan",
+      "selected": 264,
+      "target": 60
+    },
+    {
+      "available": 9686,
+      "dimension": "course",
+      "label": "soup",
+      "selected": 244,
+      "target": 80
+    },
+    {
+      "available": 10014,
+      "dimension": "method",
+      "label": "grill",
+      "selected": 261,
+      "target": 100
+    },
+    {
+      "available": 10122,
+      "dimension": "course",
+      "label": "beverage",
+      "selected": 109,
+      "target": 80
+    },
+    {
+      "available": 12395,
+      "dimension": "cuisine",
+      "label": "asian",
+      "selected": 644,
+      "target": 80
+    },
+    {
+      "available": 12644,
+      "dimension": "course",
+      "label": "bread",
+      "selected": 454,
+      "target": 80
+    },
+    {
+      "available": 12872,
+      "dimension": "course",
+      "label": "breakfast",
+      "selected": 332,
+      "target": 80
+    },
+    {
+      "available": 12892,
+      "dimension": "ingredient",
+      "label": "seafood",
+      "selected": 338,
+      "target": 120
+    },
+    {
+      "available": 13627,
+      "dimension": "course",
+      "label": "salad",
+      "selected": 239,
+      "target": 80
+    },
+    {
+      "available": 16850,
+      "dimension": "ingredient",
+      "label": "beef",
+      "selected": 470,
+      "target": 120
+    },
+    {
+      "available": 17768,
+      "dimension": "course",
+      "label": "brunch",
+      "selected": 413,
+      "target": 80
+    },
+    {
+      "available": 18669,
+      "dimension": "course",
+      "label": "appetizer",
+      "selected": 460,
+      "target": 80
+    },
+    {
+      "available": 18766,
+      "dimension": "method",
+      "label": "fry",
+      "selected": 551,
+      "target": 100
+    },
+    {
+      "available": 18794,
+      "dimension": "method",
+      "label": "saute",
+      "selected": 421,
+      "target": 100
+    },
+    {
+      "available": 19048,
+      "dimension": "dietary",
+      "label": "low_fat",
+      "selected": 525,
+      "target": 60
+    },
+    {
+      "available": 19668,
+      "dimension": "ingredient",
+      "label": "legume",
+      "selected": 438,
+      "target": 120
+    },
+    {
+      "available": 21131,
+      "dimension": "method",
+      "label": "whisk",
+      "selected": 461,
+      "target": 100
+    },
+    {
+      "available": 21482,
+      "dimension": "ingredient",
+      "label": "pork",
+      "selected": 513,
+      "target": 120
+    },
+    {
+      "available": 21819,
+      "dimension": "course",
+      "label": "lunch",
+      "selected": 664,
+      "target": 80
+    },
+    {
+      "available": 23893,
+      "dimension": "ingredient",
+      "label": "pasta_grain",
+      "selected": 684,
+      "target": 120
+    },
+    {
+      "available": 25113,
+      "dimension": "course",
+      "label": "side",
+      "selected": 715,
+      "target": 80
+    },
+    {
+      "available": 27354,
+      "dimension": "cuisine",
+      "label": "american",
+      "selected": 857,
+      "target": 80
+    },
+    {
+      "available": 32181,
+      "dimension": "dietary",
+      "label": "low_calorie",
+      "selected": 867,
+      "target": 60
+    },
+    {
+      "available": 33004,
+      "dimension": "dietary",
+      "label": "vegetarian",
+      "selected": 910,
+      "target": 60
+    },
+    {
+      "available": 35234,
+      "dimension": "ingredient",
+      "label": "poultry",
+      "selected": 982,
+      "target": 120
+    },
+    {
+      "available": 35322,
+      "dimension": "dietary",
+      "label": "healthy",
+      "selected": 891,
+      "target": 60
+    },
+    {
+      "available": 35353,
+      "dimension": "method",
+      "label": "simmer",
+      "selected": 862,
+      "target": 100
+    },
+    {
+      "available": 36603,
+      "dimension": "method",
+      "label": "blend",
+      "selected": 797,
+      "target": 100
+    },
+    {
+      "available": 36730,
+      "dimension": "dietary",
+      "label": "low_carb",
+      "selected": 1101,
+      "target": 60
+    },
+    {
+      "available": 39236,
+      "dimension": "course",
+      "label": "dessert",
+      "selected": 891,
+      "target": 80
+    },
+    {
+      "available": 40768,
+      "dimension": "time",
+      "label": "under_15",
+      "selected": 916,
+      "target": 450
+    },
+    {
+      "available": 44101,
+      "dimension": "time",
+      "label": "under_180",
+      "selected": 1108,
+      "target": 450
+    },
+    {
+      "available": 50587,
+      "dimension": "method",
+      "label": "boil",
+      "selected": 1132,
+      "target": 100
+    },
+    {
+      "available": 53779,
+      "dimension": "time",
+      "label": "under_30",
+      "selected": 1295,
+      "target": 450
+    },
+    {
+      "available": 62305,
+      "dimension": "course",
+      "label": "main",
+      "selected": 1766,
+      "target": 80
+    },
+    {
+      "available": 68558,
+      "dimension": "time",
+      "label": "under_60",
+      "selected": 1681,
+      "target": 450
+    },
+    {
+      "available": 77754,
+      "dimension": "method",
+      "label": "bake",
+      "selected": 2012,
+      "target": 100
+    },
+    {
+      "available": 127521,
+      "dimension": "method",
+      "label": "mix",
+      "selected": 3135,
+      "target": 100
+    }
+  ],
+  "seed": "fridgefriend-demo-v1",
+  "taxonomyVersion": "1"
+}

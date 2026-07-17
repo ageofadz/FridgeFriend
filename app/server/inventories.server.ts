@@ -6,11 +6,87 @@ import {
   Inventory as InventorySchema,
   type Inventory,
   type InventoryEnrichment,
-  type VisualEnrichment,
 } from "./scan/schemas/inventory";
 import { withDatabase } from "./sqlite.server";
+import type { StorageImageLocation } from "../workspace/contracts";
 
-export type FridgeInventory = typeof fridgeInventories.$inferSelect;
+function storageLocationLabel(storageLocation: StorageImageLocation) {
+  return storageLocation[0].toUpperCase() + storageLocation.slice(1);
+}
+
+export function coerceInventoryStorageLocation(
+  inventory: Inventory,
+  storageLocation: StorageImageLocation,
+) {
+  if (storageLocation === "fridge") {
+    return inventory;
+  }
+
+  const label = storageLocationLabel(storageLocation);
+
+  return {
+    ...inventory,
+    zones: inventory.zones.map((zone, index) => ({
+      ...zone,
+      type: storageLocation,
+      label: zone.label.toLowerCase().includes(storageLocation)
+        ? zone.label
+        : `${label} ${zone.label || `zone ${index + 1}`}`,
+    })),
+    items: inventory.items.map((item) => ({
+      ...item,
+      loc: {
+        ...item.loc,
+        zoneType: storageLocation,
+      },
+    })),
+  } satisfies Inventory;
+}
+
+export function inventoryWithoutStorageLocation(
+  inventory: Inventory,
+  storageLocation: StorageImageLocation,
+) {
+  if (storageLocation === "fridge") {
+    return inventory;
+  }
+
+  const keptZoneIds = new Set(
+    inventory.zones
+      .filter((zone) => zone.type !== storageLocation)
+      .map((zone) => zone.id),
+  );
+
+  return {
+    ...inventory,
+    items: inventory.items.filter((item) => item.loc.zoneType !== storageLocation),
+    zones: inventory.zones.filter((zone) => keptZoneIds.has(zone.id)),
+  } satisfies Inventory;
+}
+
+export function mergeStorageInventory(
+  baseInventory: Inventory,
+  extensionInventory: Inventory,
+  storageLocation: StorageImageLocation,
+) {
+  const baseWithoutLocation = inventoryWithoutStorageLocation(
+    baseInventory,
+    storageLocation,
+  );
+
+  return {
+    ...baseWithoutLocation,
+    scanId: `${baseInventory.scanId}:${storageLocation}:${extensionInventory.scanId}`,
+    items: [
+      ...baseWithoutLocation.items,
+      ...extensionInventory.items,
+    ],
+    zones: [
+      ...baseWithoutLocation.zones,
+      ...extensionInventory.zones,
+    ],
+  } satisfies Inventory;
+}
 
 export function saveFridgeInventory(input: {
   imageId: string;
@@ -66,78 +142,6 @@ export function getFridgeInventoryForImage(imageId: string) {
   });
 }
 
-export function appendFridgeInventoryVisualEnrichment(input: {
-  imageId: string;
-  itemIds: string[];
-  query: string;
-  response: string;
-  crops: Array<Pick<VisualEnrichment, "imageId" | "boundingBox"> & { itemId: string }>;
-  observedAt?: string;
-  updates?: Array<{
-    itemId: string;
-    amount: number | null;
-    unit: Inventory["items"][number]["qty"]["unit"] | null;
-    fillLevel: number | null;
-    expirationDate: string | null;
-  }>;
-}) {
-  const inventory = getFridgeInventoryForImage(input.imageId);
-
-  if (!inventory) {
-    throw new Error(
-      `Cannot persist visual enrichment because inventory was not found for image ${input.imageId}`,
-    );
-  }
-
-  const cropByItemId = new Map(input.crops.map((crop) => [crop.itemId, crop]));
-  const observedAt = input.observedAt ?? new Date().toISOString();
-  const itemIds = new Set(input.itemIds);
-  const updateByItemId = new Map(input.updates?.map((update) => [update.itemId, update]) ?? []);
-  const updatedInventory: Inventory = {
-    ...inventory,
-    items: inventory.items.map((item) => {
-      const crop = cropByItemId.get(item.id);
-      const update = updateByItemId.get(item.id);
-
-      if (!itemIds.has(item.id) || !crop) {
-        return item;
-      }
-
-      return {
-        ...item,
-        qty: update ? {
-          ...item.qty,
-          amount: update.amount ?? item.qty.amount,
-          unit: update.unit ?? item.qty.unit,
-          fillLevel: update.fillLevel ?? item.qty.fillLevel,
-          precision: update.amount !== null || update.fillLevel !== null
-            ? "estimated"
-            : item.qty.precision,
-        } : item.qty,
-        attrs: update?.expirationDate ? {
-          ...item.attrs,
-          expirationDate: update.expirationDate,
-        } : item.attrs,
-        visual: [
-          ...(item.visual ?? []),
-          {
-            query: input.query,
-            response: input.response,
-            imageId: crop.imageId,
-            boundingBox: crop.boundingBox,
-            observedAt,
-          },
-        ],
-      };
-    }),
-  };
-
-  return saveFridgeInventory({
-    imageId: input.imageId,
-    inventory: updatedInventory,
-  });
-}
-
 export function appendFridgeInventoryEnrichments(input: {
   imageId: string;
   enrichments: Array<InventoryEnrichment & { itemId: string }>;
@@ -162,9 +166,19 @@ export function appendFridgeInventoryEnrichments(input: {
     items: inventory.items.map((item) => {
       const enrichments = enrichmentsByItemId.get(item.id);
       if (!enrichments?.length) return item;
+      const existingEnrichmentKeys = new Set((item.enrichments ?? []).map((enrichment) =>
+        JSON.stringify(enrichment)
+      ));
+      const newEnrichments = enrichments
+        .map(({ itemId: _itemId, ...enrichment }) => enrichment)
+        .filter((enrichment) => !existingEnrichmentKeys.has(JSON.stringify(enrichment)));
 
-      const latest = enrichments.at(-1)!;
-      const expirationEnrichment = [...enrichments]
+      if (newEnrichments.length === 0) {
+        return item;
+      }
+
+      const latest = newEnrichments.at(-1)!;
+      const expirationEnrichment = [...newEnrichments]
         .reverse()
         .find((enrichment) => enrichment.values.expirationDate !== null);
 
@@ -191,7 +205,7 @@ export function appendFridgeInventoryEnrichments(input: {
         },
         enrichments: [
           ...(item.enrichments ?? []),
-          ...enrichments.map(({ itemId: _itemId, ...enrichment }) => enrichment),
+          ...newEnrichments,
         ],
       };
     }),
@@ -209,7 +223,7 @@ export function applyFridgeInventorySplit(input: {
     category: Inventory["items"][number]["cat"];
     packaging: Inventory["items"][number]["pack"];
     boundingBox: Inventory["items"][number]["loc"]["observations"][number]["boundingBox"];
-    zoneId: string;
+    zoneId: string | null;
     zoneType: Inventory["items"][number]["loc"]["zoneType"];
   }>;
 }) {
@@ -241,7 +255,7 @@ export function applyFridgeInventorySplit(input: {
       confidence: 0.75,
     },
     conf: 0.75,
-    src: [...input.replaceItemIds, `drawer-split:${now}`],
+    src: [...input.replaceItemIds, `inventory-split:${now}`],
     attrs: { brand: null, variant: null, opened: null, expirationDate: null, expirationDateSource: null },
     review: "confirmed",
   }));
@@ -252,13 +266,5 @@ export function applyFridgeInventorySplit(input: {
       ...inventory,
       items: [...inventory.items.filter((item) => !replacementIds.has(item.id)), ...splitItems],
     },
-  });
-}
-
-export function deleteFridgeInventoryForImage(imageId: string) {
-  return withDatabase((db) => {
-    db.delete(fridgeInventories)
-      .where(eq(fridgeInventories.imageId, imageId))
-      .run();
   });
 }

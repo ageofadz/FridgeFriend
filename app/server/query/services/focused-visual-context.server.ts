@@ -5,6 +5,7 @@ import { getFridgeInventoryForImage } from "../../inventories.server";
 import type { NormalizedBoundingBox } from "../../scan/schemas/inventory";
 import {
   inventorySeedCropId,
+  type ConversationContext,
   type ConversationContextSeededItem,
 } from "../../../workspace/contracts";
 import type { summarizeInventory } from "./inventory-context.server";
@@ -24,7 +25,7 @@ export type FocusedVisualCrop = {
   dataUrl: string;
 };
 
-export type FocusedVisualCropMetadata = Omit<FocusedVisualCrop, "dataUrl">;
+type FocusedVisualCropMetadata = Omit<FocusedVisualCrop, "dataUrl">;
 
 export class InventoryCropError extends Error {
   status: number;
@@ -146,7 +147,7 @@ function getInventoryForCropImage(imageId: string) {
   return baseImageId ? getFridgeInventoryForImage(baseImageId) : null;
 }
 
-export function inventoryCropId(input: {
+function inventoryCropId(input: {
   imageId: string;
   itemId: string;
   observationIndex: number;
@@ -281,19 +282,27 @@ export async function buildFocusedVisualCrops(input: {
   inventory: InventorySummary | null;
   itemIds?: string[];
   seededItems?: ConversationContextSeededItem[];
+  seededBoundingBoxes?: ConversationContext["seededBoundingBoxes"];
   loadImageDataUrlForQuery?: (
     imageId: string,
   ) => string | null | Promise<string | null>;
 }) {
-  if (!input.inventory) {
+  const seededBoundingBoxes = input.seededBoundingBoxes ?? [];
+
+  if (!input.inventory && seededBoundingBoxes.length === 0) {
     return [];
   }
 
   const itemIds = input.itemIds ? new Set(input.itemIds) : null;
   const seededItems = input.seededItems ?? [];
   const seededCropRequests = seededItems.flatMap((seed) => {
+      if (!input.inventory) {
+        throw new Error(
+          `Focused visual crop ${seed.cropId} could not be resolved because inventory was not loaded`,
+        );
+      }
       const parsedCrop = parseInventoryCropId(seed.cropId);
-      const item = input.inventory?.items.find((candidate) =>
+      const item = input.inventory.items.find((candidate) =>
         candidate.id === seed.itemId
       );
       const observation = item?.location.observations[parsedCrop.observationIndex];
@@ -322,7 +331,7 @@ export async function buildFocusedVisualCrops(input: {
     ),
   );
   const regularCropRequests = input.imageId
-    ? input.inventory.items
+    ? (input.inventory?.items ?? [])
       .filter((item) => !itemIds || itemIds.has(item.id))
       .flatMap((item) =>
         itemObservationsForImage(item, input.imageId as string).map(({ observation, observationIndex }) => ({
@@ -337,7 +346,7 @@ export async function buildFocusedVisualCrops(input: {
     : [];
   const cropRequests = [...seededCropRequests, ...regularCropRequests];
 
-  if (cropRequests.length === 0) {
+  if (cropRequests.length === 0 && seededBoundingBoxes.length === 0) {
     return [];
   }
 
@@ -366,8 +375,7 @@ export async function buildFocusedVisualCrops(input: {
     return source;
   }
 
-  return Promise.all(
-    cropRequests.map(async ({ item, observation, observationIndex }): Promise<FocusedVisualCrop> => ({
+  const itemCrops = cropRequests.map(async ({ item, observation, observationIndex }): Promise<FocusedVisualCrop> => ({
       cropId: inventoryCropId({
         imageId: observation.imageId,
         itemId: item.id,
@@ -381,7 +389,21 @@ export async function buildFocusedVisualCrops(input: {
         await sourceForImage(observation.imageId),
         observation.boundingBox,
       ),
-    })),
+    }));
+  const boxCrops = seededBoundingBoxes.map(async (box, index): Promise<FocusedVisualCrop> => ({
+    cropId: box.cropId,
+    itemId: box.cropId,
+    displayName: `selected area ${index + 1}`,
+    imageId: box.imageId,
+    boundingBox: box.boundingBox,
+    dataUrl: cropJpegDataUrl(
+      await sourceForImage(box.imageId),
+      box.boundingBox,
+    ),
+  }));
+
+  return Promise.all(
+    [...boxCrops, ...itemCrops],
   );
 }
 

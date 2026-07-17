@@ -8,7 +8,7 @@ import { createQueryModel } from "../services/query-model.server";
 import { loadInventoryContext } from "../services/inventory-context.server";
 import type { FridgeQueryStateValue } from "../state";
 import type { WorkspaceAction } from "../../../workspace/contracts";
-import { ConversationContextSchema } from "../../../workspace/contracts";
+import { conversationContextFromState } from "../services/conversation-context.server";
 
 function recipeEntries(state: FridgeQueryStateValue) {
   const retrieval = state.context.recipeRetrieval;
@@ -82,8 +82,26 @@ function expiryPriorityItemIds(state: FridgeQueryStateValue, itemIds: Set<string
   );
 }
 
+function hasAppliedSeededInventoryAssertions(state: FridgeQueryStateValue) {
+  return Array.isArray(state.context.seededInventoryAssertions) &&
+    state.context.seededInventoryAssertions.length > 0;
+}
+
 export function createPlanWorkspaceActionsNode(deps: QueryGraphDependencies = {}) {
   return async function planWorkspaceActionsNode(state: FridgeQueryStateValue) {
+    if (
+      state.intent === "organization" &&
+      typeof state.context.organizationPlan === "object" &&
+      state.context.organizationPlan !== null
+    ) {
+      return {};
+    }
+    if (hasAppliedSeededInventoryAssertions(state)) {
+      return {
+        context: { ...state.context, workspaceActions: [] },
+      };
+    }
+
     const loadedPrompt = deps.promptBundle?.workspaceActionPlan;
     if (!loadedPrompt) {
       return {
@@ -101,8 +119,7 @@ export function createPlanWorkspaceActionsNode(deps: QueryGraphDependencies = {}
       item.id,
       { imageId: observation.imageId, boundingBox: observation.boundingBox },
     ] as const)));
-    const selection = ConversationContextSchema.catch({ selectedItemIds: [], selectedZoneIds: [], selectedRecipeId: null, seededItems: [] })
-      .parse(state.context.conversationContext);
+    const selection = conversationContextFromState(state);
     const model = deps.workspaceActionModel ?? createQueryModel();
     const structuredModel = model.withStructuredOutput(WorkspaceActionPlanProviderSchema, {
       name: "FridgeWorkspaceActionPlan",

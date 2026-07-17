@@ -1,6 +1,6 @@
 import { promptMessages } from "../../scan/services/prompt-messages.server";
 import type { QueryGraphDependencies } from "../schemas/query";
-import { createQueryModel } from "../services/query-model.server";
+import { createQueryModel, CHAT_PROVIDER, GENERAL_MODEL } from "../services/query-model.server";
 import type { RecipeTournamentEvaluation } from "../services/recipe-tournament.server";
 import type { FridgeQueryStateValue } from "../state";
 
@@ -43,10 +43,19 @@ export function createEvaluateRecipeNode(deps: QueryGraphDependencies = {}) {
           dietaryPreferences: state.dietaryPreferences,
           activeGoals: state.activeGoals,
           recipe: candidate,
-          expiryPlan: state.context.expiryPlan ?? null,
+          expiryPlan: state.context?.expiryPlan ?? null,
         }),
       });
-      const result = await structuredModel.invoke(messages);
+      const result = await structuredModel.invoke(messages, {
+        tags: ["query", "evaluate_recipe"],
+        metadata: {
+          recipeId: candidate.id,
+          langsmithPromptName: loadedPrompt.name,
+          langsmithPromptRef: loadedPrompt.ref,
+          provider: CHAT_PROVIDER,
+          model: GENERAL_MODEL,
+        },
+      });
       if (
         typeof result !== "object" || result === null ||
         !validScore(result.nutrition) || !validScore(result.ingredientCoverage) ||

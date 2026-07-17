@@ -1,6 +1,6 @@
 import { promptMessages } from "../../scan/services/prompt-messages.server";
 import type { QueryGraphDependencies, RecipeRetrievalGrade } from "../schemas/query";
-import { createQueryModel } from "../services/query-model.server";
+import { createQueryModel, CHAT_PROVIDER, GENERAL_MODEL } from "../services/query-model.server";
 import type { FridgeQueryStateValue } from "../state";
 
 const RecipeRetrievalGradeProviderSchema = {
@@ -19,7 +19,7 @@ function failedGrade(reason: string): RecipeRetrievalGrade {
 export function createGradeRecipeRetrievalNode(deps: QueryGraphDependencies = {}) {
   return async function gradeRecipeRetrievalNode(state: FridgeQueryStateValue) {
     if (state.tournamentCandidates.length === 0) {
-      return irrelevantResult(state, failedGrade("The local Food.com index returned no eligible recipes."));
+      return irrelevantResult(state, failedGrade("Recipe retrieval returned no eligible candidates."));
     }
 
     const loadedPrompt = deps.promptBundle?.recipeRetrievalGrade;
@@ -46,7 +46,18 @@ export function createGradeRecipeRetrievalNode(deps: QueryGraphDependencies = {}
           })),
         }),
       });
-      const result = await structuredModel.invoke(messages);
+      const result = await structuredModel.invoke(messages, {
+        tags: ["query", "grade_recipe_retrieval"],
+        metadata: {
+          userId: state.userId,
+          fridgeId: state.fridgeId,
+          imageId: state.imageId,
+          langsmithPromptName: loadedPrompt.name,
+          langsmithPromptRef: loadedPrompt.ref,
+          provider: CHAT_PROVIDER,
+          model: GENERAL_MODEL,
+        },
+      });
       if (
         typeof result !== "object" || result === null ||
         !("relevant" in result) || typeof result.relevant !== "boolean" ||
@@ -68,8 +79,16 @@ function irrelevantResult(state: FridgeQueryStateValue, grade: RecipeRetrievalGr
   }
   const current = state.context.recipeRetrieval;
   const retrieval = current && typeof current === "object" ? current as Record<string, unknown> : {};
+  const audit = state.recipeRetrievalAudit
+    ? {
+      ...state.recipeRetrievalAudit,
+      tournamentCandidates: 0,
+      terminalReason: "tournament_empty" as const,
+    }
+    : null;
   return {
     recipeRetrievalGrade: grade,
+    recipeSearchExhausted: true,
     context: {
       ...state.context,
       recipeRetrieval: {
@@ -77,8 +96,10 @@ function irrelevantResult(state: FridgeQueryStateValue, grade: RecipeRetrievalGr
         recipes: [],
         noMatches: true,
         exhausted: true,
-        reason: `Recipe retrieval remained irrelevant after one query rewrite: ${grade.reason}`,
+        reason: `Recipe retrieval remained irrelevant after one corrective attempt: ${grade.reason}`,
+        ...(audit ? { audit } : {}),
       },
     },
+    recipeRetrievalAudit: audit,
   };
 }

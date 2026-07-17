@@ -1,7 +1,9 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-
+import type { FridgeFriendChatModel } from "../../ai/chat-model.server";
+import {
+  CHAT_VISION_PROVIDER as CHAT_PROVIDER,
+  CHAT_VISION_MODEL as VISION_MODEL,
+} from "../../ai/chat-model.server";
 import type { PromptBundle } from "../../prompts/registry.server";
-import { VISION_MODEL } from "../schemas/inventory";
 import {
   LocationAdjudicationModelResult,
   LocationAdjudicationResponseSchema,
@@ -19,7 +21,7 @@ import { createVisionModel } from "./vision-model.server";
 
 export type LocationAdjudicationDependencies = {
   promptBundle: Pick<PromptBundle, "locationAdjudication">;
-  adjudicationModel?: ChatGoogleGenerativeAI;
+  adjudicationModel?: FridgeFriendChatModel;
 };
 
 function invalidAdjudication(reason: string) {
@@ -60,6 +62,7 @@ async function runLocationAdjudicationModel(
     metadata: {
       langsmithPromptName: loadedPrompt.name,
       langsmithPromptRef: loadedPrompt.ref,
+      provider: CHAT_PROVIDER,
       model: VISION_MODEL,
     },
   });

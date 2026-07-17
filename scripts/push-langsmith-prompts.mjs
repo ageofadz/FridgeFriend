@@ -12,6 +12,28 @@ const prompts = JSON.parse(
     "utf8",
   ),
 );
+const [option, promptName] = process.argv.slice(2);
+
+if (option !== undefined && option !== "--name") {
+  throw new Error(`Unknown option: ${option}`);
+}
+
+if (option === "--name" && !promptName) {
+  throw new Error("Missing prompt name after --name");
+}
+
+if (process.argv.length > 4) {
+  throw new Error("Only one prompt name may be provided");
+}
+
+const promptsToPush = promptName
+  ? prompts.filter((prompt) => prompt.name === promptName)
+  : prompts;
+
+if (promptName && promptsToPush.length === 0) {
+  throw new Error(`Unknown prompt name: ${promptName}`);
+}
+
 const client = new Client({
   apiKey: requiredEnv("LANGSMITH_API_KEY"),
   apiUrl: requiredEnv("LANGSMITH_ENDPOINT"),
@@ -35,7 +57,7 @@ function isUnchanged(error) {
   );
 }
 
-for (const promptDefinition of prompts) {
+for (const promptDefinition of promptsToPush) {
   const promptId = `fridgefriend-${promptDefinition.name}`;
   const prompt = ChatPromptTemplate.fromMessages(
     promptDefinition.messages,

@@ -1,7 +1,7 @@
 import { ReducedValue, StateSchema } from "@langchain/langgraph";
 import { z } from "zod";
 
-import { FridgeZoneMap, Inventory, RawDetection } from "./schemas/inventory";
+import { FridgeZoneMap, GroundedPlacement, Inventory, RawDetection } from "./schemas/inventory";
 import {
   AmbiguousLocationRequest,
   LocationAdjudicationDecision,
@@ -28,13 +28,19 @@ export const ScanState = new StateSchema({
   fridgeId: z.string(),
   imageIds: z.array(z.string()),
   storageLocation: z.enum(["fridge", "freezer", "pantry"]),
-  rawDetections: z.array(RawDetection).default([]),
+  rawDetections: new ReducedValue(z.array(RawDetection).default(() => []), {
+    reducer: (current, next) =>
+      mergeByKey(current, next, (detection) => detection.id),
+  }),
   detectionModelRawOutput: z.unknown().nullable().default(null),
   zoneMaps: new ReducedValue(z.array(FridgeZoneMap).default(() => []), {
     reducer: (current, next) =>
       mergeByKey(current, next, (zoneMap) => zoneMap.imageId),
   }),
   zoneMapModelRawOutput: z.unknown().nullable().default(null),
+  groundedPlacements: new ReducedValue(z.array(GroundedPlacement).default(() => []), {
+    reducer: (current, next) => mergeByKey(current, next, (placement) => placement.detectionId),
+  }),
   reconciledLocations: new ReducedValue(
     z.array(ReconciledLocation).default(() => []),
     {
@@ -60,8 +66,10 @@ export const ScanState = new StateSchema({
   imageValidation: ValidationResult.nullable().default(null),
   detectionValidation: ValidationResult.nullable().default(null),
   zoneMapValidation: ValidationResult.nullable().default(null),
+  placementValidation: ValidationResult.nullable().default(null),
   reconciliationValidation: ValidationResult.nullable().default(null),
   adjudicationValidation: ValidationResult.nullable().default(null),
+  inventoryValidation: ValidationResult.nullable().default(null),
   scanStatus: z
     .enum(["pending", "processing", "completed", "failed"])
     .default("pending"),

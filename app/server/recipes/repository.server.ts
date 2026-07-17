@@ -6,6 +6,7 @@ import {
   foodComRecipes,
 } from "../db/schema.server";
 import { withDatabase } from "../sqlite.server";
+import { chunk } from "./chunk";
 import { normalizeIngredientName, normalizeRecipeTag } from "./normalization";
 import type { Recipe, RecipeIngredient, RecipeNutrition, RecipeRating } from "./types";
 
@@ -157,16 +158,6 @@ function rowForRecipe(recipe: Recipe) {
   };
 }
 
-function chunk<T>(values: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-
-  return chunks;
-}
-
 export function upsertRecipes(recipes: Recipe[]): number {
   if (recipes.length === 0) {
     return 0;
@@ -236,6 +227,13 @@ export function upsertRecipes(recipes: Recipe[]): number {
   });
 }
 
+export function countStoredRecipes() {
+  return withDatabase((_, sqlite) => {
+    const row = sqlite.prepare("select count(*) as count from food_com_recipes").get() as { count: number };
+    return row.count;
+  });
+}
+
 export type RecipeTagCandidate = {
   recipeId: string;
   matchedTags: string[];
@@ -246,6 +244,10 @@ export type RecipeIngredientCandidate = {
   recipeId: string;
   matchedIngredients: string[];
   ingredientScore: number;
+};
+
+export type PantryCompletionRecipeCandidate = RecipeIngredientCandidate & {
+  missingIngredientCount: number;
 };
 
 export function listFoodComTags(): string[] {
@@ -337,50 +339,67 @@ export function getRecipeCandidatesByIngredients(input: {
   });
 }
 
-export function rebuildFoodComRecipeTagIndex(): number {
-  return withDatabase((db) => db.transaction((transaction) => {
-    const rows = transaction.select().from(foodComRecipes).all();
-    transaction.delete(foodComRecipeTags).run();
-    let count = 0;
+export function getPantryCompletionRecipeCandidates(input: {
+  ingredients: string[];
+  universalIngredients: readonly string[];
+  minMissingIngredients: number;
+  maxMissingIngredients: number;
+  limit: number;
+}): PantryCompletionRecipeCandidate[] {
+  const ingredients = [...new Set(input.ingredients.map(normalizeIngredientName).filter(Boolean))];
+  const universalIngredients = [...new Set(input.universalIngredients.map(normalizeIngredientName).filter(Boolean))];
+  const coveredIngredients = [...new Set([...ingredients, ...universalIngredients])];
 
-    for (const row of rows) {
-      const tags = [...new Set(parseStringArray(row.tagsJson, "tags", row.id)
-        .map(normalizeRecipeTag)
-        .filter(Boolean))];
-      if (tags.length === 0) {
-        continue;
-      }
-      transaction.insert(foodComRecipeTags)
-        .values(tags.map((tag) => ({ recipeId: row.id, tag })))
-        .run();
-      count += tags.length;
-    }
+  if (
+    ingredients.length === 0 ||
+    !Number.isInteger(input.minMissingIngredients) ||
+    !Number.isInteger(input.maxMissingIngredients) ||
+    input.minMissingIngredients < 0 ||
+    input.maxMissingIngredients < input.minMissingIngredients ||
+    !Number.isInteger(input.limit) ||
+    input.limit <= 0
+  ) {
+    return [];
+  }
 
-    return count;
-  }));
-}
+  const ingredientPlaceholders = ingredients.map(() => "?").join(", ");
+  const coveredPlaceholders = coveredIngredients.map(() => "?").join(", ");
 
-export function rebuildFoodComRecipeIngredientIndex(): number {
-  return withDatabase((db) => db.transaction((transaction) => {
-    const rows = transaction.select().from(foodComRecipes).all();
-    transaction.delete(foodComRecipeIngredients).run();
-    let count = 0;
+  return withDatabase((_, sqlite) => {
+    const rows = sqlite.prepare(`
+      select
+        r.id as recipeId,
+        group_concat(case when i.ingredient in (${ingredientPlaceholders}) then i.ingredient end, char(31)) as matchedIngredients,
+        count(case when i.ingredient in (${ingredientPlaceholders}) then 1 end) as matchedIngredientCount,
+        count(i.ingredient) - count(case when i.ingredient in (${coveredPlaceholders}) then 1 end) as missingIngredientCount
+      from food_com_recipes r
+      join food_com_recipe_ingredients i on i.recipe_id = r.id
+      group by r.id
+      having matchedIngredientCount > 0
+        and missingIngredientCount between ? and ?
+      order by matchedIngredientCount desc, missingIngredientCount asc, recipeId asc
+      limit ?
+    `).all(
+      ...ingredients,
+      ...ingredients,
+      ...coveredIngredients,
+      input.minMissingIngredients,
+      input.maxMissingIngredients,
+      input.limit,
+    ) as Array<{
+      recipeId: string;
+      matchedIngredients: string;
+      matchedIngredientCount: number;
+      missingIngredientCount: number;
+    }>;
 
-    for (const row of rows) {
-      const ingredients = [...new Set(parseIngredients(row.ingredientsJson, row.id)
-        .map((ingredient) => normalizeIngredientName(ingredient.canonicalName))
-        .filter(Boolean))];
-      if (ingredients.length === 0) {
-        continue;
-      }
-      transaction.insert(foodComRecipeIngredients)
-        .values(ingredients.map((ingredient) => ({ recipeId: row.id, ingredient })))
-        .run();
-      count += ingredients.length;
-    }
-
-    return count;
-  }));
+    return rows.map((row) => ({
+      recipeId: row.recipeId,
+      matchedIngredients: row.matchedIngredients.split(String.fromCharCode(31)).sort(),
+      ingredientScore: row.matchedIngredientCount / ingredients.length,
+      missingIngredientCount: row.missingIngredientCount,
+    }));
+  });
 }
 
 export function rebuildFoodComRecipeMetadataIndexes(): {
@@ -421,19 +440,6 @@ export function rebuildFoodComRecipeMetadataIndexes(): {
   }));
 }
 
-export function getRecipeById(recipeId: string): Recipe | null {
-  const id = recipeId.trim();
-
-  if (!id) {
-    return null;
-  }
-
-  return withDatabase((db) => {
-    const row = db.select().from(foodComRecipes).where(inArray(foodComRecipes.id, [id])).get();
-    return row ? rowToRecipe(row) : null;
-  });
-}
-
 export function getRecipesByIds(recipeIds: string[]): Recipe[] {
   const ids = [...new Set(recipeIds.map((recipeId) => recipeId.trim()).filter(Boolean))];
 
@@ -453,15 +459,3 @@ export function getRecipesByIds(recipeIds: string[]): Recipe[] {
     });
   });
 }
-
-export const recipeRepository = {
-  getById: getRecipeById,
-  getMany: getRecipesByIds,
-  getCandidatesByTags: getRecipeCandidatesByTags,
-  getCandidatesByIngredients: getRecipeCandidatesByIngredients,
-  listTags: listFoodComTags,
-  rebuildTagIndex: rebuildFoodComRecipeTagIndex,
-  rebuildIngredientIndex: rebuildFoodComRecipeIngredientIndex,
-  rebuildMetadataIndexes: rebuildFoodComRecipeMetadataIndexes,
-  upsert: upsertRecipes,
-};

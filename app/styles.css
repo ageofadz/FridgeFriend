@@ -187,6 +187,15 @@ input[type="file"] {
   height: 100% !important;
 }
 
+.fridge-canvas-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
 .fridge-item-panel {
   display: grid;
   align-content: start;
@@ -303,6 +312,33 @@ input[type="file"] {
   display: grid;
   gap: 0;
   padding: 0;
+}
+
+.ff-chat-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  border-bottom: 1px solid #c9d3c4;
+  background: #eef1eb;
+  padding: 8px 12px;
+}
+
+.ff-chat-clear {
+  border: 1px solid #9b2c2c;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #9b2c2c;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 7px 9px;
+}
+
+.ff-chat-clear:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .ff-chat-messages {
@@ -526,10 +562,6 @@ input[type="file"] {
   box-shadow: 0 9px 22px rgb(23 32 27 / 18%);
 }
 
-.ff-recipe-card-winner {
-  border-color: #2d641b;
-}
-
 .ff-recipe-card:focus-visible {
   outline: 2px solid #2d641b;
   outline-offset: 2px;
@@ -621,25 +653,6 @@ input[type="file"] {
   -webkit-line-clamp: 2;
 }
 
-.ff-recipe-card-winner-label,
-.ff-recipe-card-finalist-label {
-  width: fit-content;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 7px;
-}
-
-.ff-recipe-card-winner-label {
-  background: #d6eacb;
-  color: #205113;
-}
-
-.ff-recipe-card-finalist-label {
-  background: #e8eee4;
-  color: #47564b;
-}
-
 .ff-recipe-card-description {
   display: -webkit-box;
   overflow: hidden;
@@ -727,6 +740,311 @@ input[type="file"] {
   padding: 7px 10px;
 }
 
+.ff-grocery-plan {
+  display: grid;
+  gap: 12px;
+  margin: 0.8rem 0;
+  padding: 0.9rem;
+  border: 1px solid #b7cdb0;
+  border-radius: 0.75rem;
+  background: #f8fbf6;
+}
+
+.ff-pantry-completion {
+  display: grid;
+  gap: 12px;
+  margin: 0.8rem 0;
+  padding: 0.9rem;
+  border: 1px solid #b7cdb0;
+  border-radius: 0.75rem;
+  background: #f8fbf6;
+}
+
+.ff-pantry-completion button {
+  border: 1px solid #2d641b;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #2d641b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
+}
+
+.ff-pantry-completion button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ff-pantry-completion-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ff-pantry-completion-list li {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px solid #d6e1d2;
+}
+
+.ff-pantry-completion-list li > div {
+  display: grid;
+  gap: 2px;
+}
+
+.ff-pantry-completion-list span,
+.ff-pantry-completion-list small {
+  color: #526159;
+  font-size: 12px;
+}
+
+.ff-grocery-plan-heading,
+.ff-grocery-list-heading,
+.ff-grocery-plan-pages,
+.ff-grocery-list-heading button {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ff-grocery-plan-heading,
+.ff-grocery-list-heading {
+  justify-content: space-between;
+}
+
+.ff-grocery-plan h3,
+.ff-grocery-plan h4,
+.ff-grocery-plan h5,
+.ff-grocery-plan p {
+  margin: 0;
+}
+
+.ff-grocery-plan h3,
+.ff-grocery-plan h4 {
+  color: #17201b;
+}
+
+.ff-grocery-plan p,
+.ff-grocery-plan-pages span,
+.ff-grocery-aisle small {
+  color: #526159;
+  font-size: 12px;
+}
+
+.ff-grocery-plan-pages button,
+.ff-grocery-list-heading button {
+  border: 1px solid #2d641b;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #2d641b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
+}
+
+.ff-grocery-plan-pages button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ff-organization-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ff-label-button {
+  border: 1px solid #c9d3c4;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #17201b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 6px 8px;
+}
+
+.ff-label-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ff-grocery-list {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #d6e1d2;
+}
+
+.ff-grocery-aisle {
+  display: grid;
+  gap: 5px;
+}
+
+.ff-grocery-aisle h5 {
+  color: #2d641b;
+  font-size: 13px;
+}
+
+.ff-grocery-aisle ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ff-grocery-aisle li {
+  display: grid;
+  gap: 2px;
+}
+
+.ff-grocery-aisle label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #17201b;
+  font-size: 14px;
+}
+
+.ff-grocery-aisle label input[type="text"],
+.ff-grocery-aisle label input:not([type]) {
+  flex: 1;
+}
+
+.ff-grocery-aisle input[type="text"],
+.ff-grocery-item-controls select,
+.ff-grocery-item-controls button,
+.ff-grocery-add-item {
+  border: 1px solid #c9d3c4;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #17201b;
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 7px;
+}
+
+.ff-grocery-item-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ff-grocery-item-controls button,
+.ff-grocery-add-item {
+  cursor: pointer;
+}
+
+.grocery-list-workspace {
+  min-height: 0;
+  padding-top: 12px;
+}
+
+.user-profile-workspace {
+  min-height: 0;
+  padding-top: 12px;
+}
+
+.user-profile-artifact {
+  display: grid;
+  gap: 14px;
+}
+
+.user-profile-artifact-heading {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.user-profile-artifact-heading h3,
+.user-profile-artifact-heading p,
+.user-profile-memory-section h4,
+.user-profile-memory-section p {
+  margin: 0;
+}
+
+.user-profile-artifact-heading h3,
+.user-profile-memory-section h4 {
+  color: #17201b;
+}
+
+.user-profile-artifact-heading p,
+.user-profile-memory-section p,
+.user-profile-memory-section span,
+.user-profile-memory-section small {
+  color: #526159;
+  font-size: 12px;
+}
+
+.user-profile-artifact-heading button {
+  border: 1px solid #9b2c2c;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #9b2c2c;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
+}
+
+.user-profile-artifact-heading button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.user-profile-memory-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.user-profile-memory-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #d6e1d2;
+}
+
+.user-profile-memory-section ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.user-profile-memory-section li {
+  display: grid;
+  gap: 2px;
+}
+
+.user-profile-memory-section strong {
+  color: #17201b;
+  font-size: 14px;
+}
+
+.ff-grocery-aisle input:checked + span {
+  color: #526159;
+  text-decoration: line-through;
+}
+
+.ff-grocery-plan-pending {
+  color: #526159;
+}
+
 @keyframes recipe-skeleton-shimmer {
   from {
     background-position: 120% 0;
@@ -765,6 +1083,14 @@ input[type="file"] {
   .ff-recipe-skeleton-pill {
     animation: none;
   }
+
+  .ff-chat-food-loading__food--outgoing {
+    display: none;
+  }
+
+  .ff-chat-food-loading__food--incoming {
+    animation: none;
+  }
 }
 
 .ff-chat-error {
@@ -783,6 +1109,60 @@ input[type="file"] {
 .ff-chat-progress p {
   margin: 0;
   color: inherit;
+}
+
+.ff-chat-food-loading {
+  display: inline-flex;
+  min-height: 56px;
+  align-items: center;
+  gap: 10px;
+  color: #4b5b4e;
+}
+
+.ff-chat-food-loading__label {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ff-chat-food-loading__emoji {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+}
+
+.ff-chat-food-loading__food {
+  grid-area: 1 / 1;
+  font-size: 48px;
+  line-height: 1;
+}
+
+.ff-chat-food-loading__food--incoming {
+  animation: ff-chat-food-fade-in 500ms ease both;
+}
+
+.ff-chat-food-loading__food--outgoing {
+  animation: ff-chat-food-fade-out 500ms ease both;
+}
+
+@keyframes ff-chat-food-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ff-chat-food-fade-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
 }
 
 .ff-chat-form {
@@ -867,7 +1247,7 @@ input[type="file"] {
 
 .agent-workspace-chat .ff-chat-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
   border: 0;
@@ -888,7 +1268,21 @@ input[type="file"] {
   align-content: start;
   gap: 0;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 14px;
+}
+
+.agent-workspace-visual--scroll {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+}
+
+.agent-workspace-visual--scroll .grocery-list-workspace,
+.agent-workspace-visual--scroll .user-profile-workspace {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .visual-workspace-toolbar,

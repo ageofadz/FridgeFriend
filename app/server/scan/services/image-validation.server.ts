@@ -1,5 +1,8 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-
+import type { FridgeFriendChatModel } from "../../ai/chat-model.server";
+import {
+  CHAT_IMAGE_VALIDATION_MODEL as IMAGE_VALIDATION_MODEL,
+  CHAT_VISION_PROVIDER as CHAT_PROVIDER,
+} from "../../ai/chat-model.server";
 import type { PromptBundle } from "../../prompts/registry.server";
 import {
   assertImagesAreLocallyLoadable,
@@ -8,7 +11,6 @@ import {
 import { promptMessages } from "./prompt-messages.server";
 import { createImageValidationModel } from "./vision-model.server";
 import type { ScanStateValue } from "../state";
-import { IMAGE_VALIDATION_MODEL } from "../schemas/inventory";
 import {
   ImageValidationModelResult,
   type ImageValidationModelResult as ImageValidationModelResultValue,
@@ -16,7 +18,7 @@ import {
 
 export type ImageValidationDependencies = {
   promptBundle: Pick<PromptBundle, "imageValidation">;
-  validationModel?: ChatGoogleGenerativeAI;
+  validationModel?: FridgeFriendChatModel;
 };
 
 function invalidImageValidation(reason: string) {
@@ -34,9 +36,12 @@ async function runImageValidationModel(
   deps: ImageValidationDependencies,
 ): Promise<ImageValidationModelResultValue> {
   const model = deps.validationModel ?? createImageValidationModel();
-  const structuredModel = model.withStructuredOutput(ImageValidationModelResult, {
-    name: "ImageValidation",
-  });
+  const structuredModel = model.withStructuredOutput<ImageValidationModelResultValue>(
+    ImageValidationModelResult,
+    {
+      name: "ImageValidation",
+    },
+  );
   const loadedPrompt = deps.promptBundle.imageValidation;
   const messages = await promptMessages(loadedPrompt, {
     image_data_url: imageDataUrls[0],
@@ -50,6 +55,7 @@ async function runImageValidationModel(
       metadata: {
         langsmithPromptName: loadedPrompt.name,
         langsmithPromptRef: loadedPrompt.ref,
+        provider: CHAT_PROVIDER,
         model: IMAGE_VALIDATION_MODEL,
       },
     },

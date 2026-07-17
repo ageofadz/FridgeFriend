@@ -35,15 +35,11 @@ export type Recipe = {
 export type RecipeCandidate = {
   recipeId: string;
   semanticScore: number;
+  intentTier?: "primary" | "related" | "coverage";
   tagScore?: number;
   matchedTags?: string[];
   ingredientScore?: number;
   matchedInventoryIngredients?: string[];
-};
-
-export type RecipeRatingAggregate = {
-  average: number;
-  count: number;
 };
 
 export type RecipeIndexResult = {

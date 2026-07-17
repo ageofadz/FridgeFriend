@@ -6,22 +6,14 @@ export function routeAfterImageValidation(
   return state.imageValidation?.valid ? "start_scan_analysis" : "scan_failed";
 }
 
-export function routeAfterLocationReconciliation(
-  state: ScanStateValue,
-): "adjudicate_locations" | "reconcile_inventory" | "scan_failed" {
-  if (!state.reconciliationValidation?.valid) {
-    return "scan_failed";
-  }
-
-  return state.ambiguousLocationRequests.length > 0
-    ? "adjudicate_locations"
-    : "reconcile_inventory";
-}
-
-export function routeAfterLocationAdjudication(
+export function routeAfterPlacementGrounding(
   state: ScanStateValue,
 ): "reconcile_inventory" | "scan_failed" {
-  return state.adjudicationValidation?.valid
-    ? "reconcile_inventory"
-    : "scan_failed";
+  return state.placementValidation?.valid ? "reconcile_inventory" : "scan_failed";
+}
+
+export function routeAfterInventoryReconciliation(
+  state: ScanStateValue,
+): "finalize_scan" | "scan_failed" {
+  return state.inventoryValidation?.valid ? "finalize_scan" : "scan_failed";
 }

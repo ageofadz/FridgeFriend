@@ -1,16 +1,30 @@
-import { TaskType } from "@google/generative-ai";
-import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-import type { Metadata } from "chromadb";
+import {
+  GoogleGenerativeAI,
+  TaskType,
+  type BatchEmbedContentsRequest,
+  type EmbedContentRequest,
+} from "@google/generative-ai";
+import type { Metadata, Where } from "chromadb";
 
-import { getRecipeCollection } from "../chroma.server";
+import { getRecipeCollection, normalizeEmbedding } from "../chroma.server";
 import { requiredEnv } from "../env.server";
-import { buildFoodComRetrievalDocument } from "./foodcom.server";
+import { chunk } from "./chunk";
+import { buildRecipeRetrievalText } from "./normalization";
 import type { Recipe, RecipeCandidate, RecipeIndexSkip } from "./types";
 
-export const DEFAULT_RECIPE_CANDIDATE_LIMIT = 30;
+const DEFAULT_RECIPE_CANDIDATE_LIMIT = 30;
 export const MAX_RECIPE_CANDIDATE_LIMIT = 120;
 const RECIPE_EMBEDDING_MODEL = "gemini-embedding-001";
+const RECIPE_EMBEDDING_DIMENSIONS = 1536;
 const RECIPE_INDEX_BATCH_SIZE = 100;
+
+type RecipeEmbedContentRequest = EmbedContentRequest & {
+  outputDimensionality: number;
+};
+
+type RecipeBatchEmbedContentsRequest = BatchEmbedContentsRequest & {
+  requests: RecipeEmbedContentRequest[];
+};
 
 type RecipeMetadata = Metadata & {
   documentType: "recipe";
@@ -45,7 +59,7 @@ type RecipeCollectionHandle = {
   query<TMetadata extends Metadata>(input: {
     queryEmbeddings: number[][];
     nResults: number;
-    where: Record<string, string>;
+    where: Where;
     include: ["metadatas", "distances"];
   }): Promise<{
     rows(): Array<Array<{
@@ -68,14 +82,51 @@ export type RecipeVectorStoreDependencies = {
 export type RecipeSearchInput = {
   query: string;
   limit?: number;
+  /**
+   * Optional hard constraints pushed down into the Chroma metadata filter so
+   * constrained searches retrieve `limit` eligible candidates instead of
+   * retrieving `limit` rows and starving the post-retrieval filter.
+   */
+  maxMinutes?: number | null;
+  maxCalories?: number | null;
+  minProteinDailyValue?: number | null;
 };
 
 function createRecipeEmbeddings(taskType: TaskType): RecipeEmbeddings {
-  return new GoogleGenerativeAIEmbeddings({
-    apiKey: requiredEnv("GOOGLE_API_KEY"),
-    modelName: RECIPE_EMBEDDING_MODEL,
-    taskType,
+  const model = new GoogleGenerativeAI(requiredEnv("GOOGLE_API_KEY")).getGenerativeModel({
+    model: RECIPE_EMBEDDING_MODEL,
   });
+
+  const requestForText = (text: string): RecipeEmbedContentRequest => ({
+    content: { role: "user", parts: [{ text: text.replace(/\n/g, " ") }] },
+    taskType,
+    outputDimensionality: RECIPE_EMBEDDING_DIMENSIONS,
+  });
+
+  return {
+    async embedDocuments(documents) {
+      const response = await model.batchEmbedContents({
+        requests: documents.map(requestForText),
+      } as RecipeBatchEmbedContentsRequest);
+
+      if (response.embeddings.length !== documents.length) {
+        throw new Error(`Recipe embedding returned ${response.embeddings.length} vectors for ${documents.length} documents`);
+      }
+
+      return response.embeddings.map((embedding, index) => normalizeRecipeEmbedding(
+        embedding.values,
+        `Recipe document ${index + 1}`,
+      ));
+    },
+    async embedQuery(query) {
+      const response = await model.embedContent(requestForText(query));
+      return normalizeRecipeEmbedding(response.embedding.values, "Recipe query");
+    },
+  };
+}
+
+function normalizeRecipeEmbedding(values: number[] | undefined, label: string) {
+  return normalizeEmbedding(values, RECIPE_EMBEDDING_DIMENSIONS, label);
 }
 
 function metadataForRecipe(recipe: Recipe): RecipeMetadata {
@@ -92,16 +143,6 @@ function metadataForRecipe(recipe: Recipe): RecipeMetadata {
   };
 }
 
-function chunk<T>(values: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-
-  return chunks;
-}
-
 function similarityFromDistance(distance: number) {
   return 1 / (1 + Math.max(distance, 0));
 }
@@ -112,6 +153,34 @@ function validateLimit(limit: number) {
       `Food.com recipe candidate limit must be an integer from 1 to ${MAX_RECIPE_CANDIDATE_LIMIT}; received ${limit}`,
     );
   }
+}
+
+/**
+ * Builds the Chroma metadata filter for a recipe search. Numeric constraints
+ * ride along with the vector query so retrieval returns eligible candidates.
+ * Recipes with unknown nutrition are stored with `-1` sentinels plus `hasX`
+ * flags; a search constrained on a nutrient excludes unknown values, matching
+ * the JS post-filter in recipe-retrieval (which is kept as a second guard).
+ */
+function recipeSearchWhere(input: RecipeSearchInput): Where {
+  const clauses: Where[] = [{ documentType: "recipe" }];
+
+  if (input.maxMinutes !== null && input.maxMinutes !== undefined) {
+    clauses.push({ minutes: { $lte: input.maxMinutes } });
+  }
+
+  if (input.maxCalories !== null && input.maxCalories !== undefined) {
+    clauses.push({ hasCalories: true }, { calories: { $lte: input.maxCalories } });
+  }
+
+  if (input.minProteinDailyValue !== null && input.minProteinDailyValue !== undefined) {
+    clauses.push(
+      { hasProteinDailyValue: true },
+      { proteinDailyValue: { $gte: input.minProteinDailyValue } },
+    );
+  }
+
+  return clauses.length === 1 ? clauses[0] : { $and: clauses };
 }
 
 function collectionLoader(dependencies: RecipeVectorStoreDependencies) {
@@ -202,7 +271,7 @@ export async function indexRecipesInChroma(
         continue;
       }
 
-      const documents = missing.map(buildFoodComRetrievalDocument);
+      const documents = missing.map(buildRecipeRetrievalText);
       const vectors = await embeddings.embedDocuments(documents);
       const valid = validEmbeddingRecords(missing, documents, vectors, onSkippedRecipe);
 
@@ -245,7 +314,7 @@ export async function searchRecipeCandidates(
     const result = await collection.handle.query<RecipeMetadata>({
       queryEmbeddings: [queryEmbedding],
       nResults: limit,
-      where: { documentType: "recipe" },
+      where: recipeSearchWhere(input),
       include: ["metadatas", "distances"],
     });
     const candidates = result.rows()[0] ?? [];

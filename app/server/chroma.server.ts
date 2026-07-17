@@ -1,4 +1,4 @@
-import { ChromaClient, ChromaUniqueError } from "chromadb";
+import { ChromaClient } from "chromadb";
 
 import { optionalEnv } from "./env.server";
 
@@ -8,7 +8,6 @@ const DEFAULT_CHROMA_PATH = ".data/chroma";
 const DEFAULT_CHROMA_TENANT = "default_tenant";
 const DEFAULT_CHROMA_DATABASE = "default_database";
 
-const COLLECTION_NAME = "fridgefriend_foundation";
 const MEMORY_COLLECTION_NAME = "fridgefriend_memory";
 const RECIPE_COLLECTION_NAME = "fridgefriend_recipes";
 
@@ -34,69 +33,51 @@ function createChromaClient(url: string) {
   }
 }
 
-export function getChromaTenant() {
+function getChromaTenant() {
   return optionalEnv("CHROMA_TENANT") ?? DEFAULT_CHROMA_TENANT;
 }
 
-export function getChromaDatabase() {
+function getChromaDatabase() {
   return optionalEnv("CHROMA_DATABASE") ?? DEFAULT_CHROMA_DATABASE;
 }
 
-async function ensureCollection(client: ChromaClient, name: string) {
-  try {
-    await client.createCollection({
-      name,
-      embeddingFunction: null,
-    });
-  } catch (error) {
-    if (error instanceof ChromaUniqueError) {
-      return;
-    }
-
-    throw error;
-  }
-}
-
-function chromaApiBaseUrl(url: string) {
-  return url.replace(/\/+$/, "");
-}
-
-async function getCollectionId(url: string, name: string) {
-  const endpoint = [
-    chromaApiBaseUrl(url),
-    "api/v2/tenants",
-    encodeURIComponent(getChromaTenant()),
-    "databases",
-    encodeURIComponent(getChromaDatabase()),
-    "collections",
-    encodeURIComponent(name),
-  ].join("/");
-  const response = await fetch(endpoint);
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Chroma collection ${name} lookup failed with ${response.status}: ${text}`);
+/**
+ * L2-normalizes an embedding vector after validating its shape. Gemini
+ * embedding vectors are only pre-normalized at the full 3072-dimension output,
+ * so truncated outputs (for example 768 or 1536 dimensions) must be normalized
+ * before they are stored or queried for cosine/L2 distances to be meaningful.
+ */
+export function normalizeEmbedding(
+  values: number[] | undefined,
+  dimensions: number,
+  label: string,
+) {
+  if (!values) {
+    throw new Error(`${label} embedding response did not include vector values`);
   }
 
-  const payload = await response.json() as unknown;
-
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    !("id" in payload) ||
-    typeof payload.id !== "string"
-  ) {
-    throw new Error(`Chroma collection ${name} lookup returned no collection id`);
+  if (values.length !== dimensions) {
+    throw new Error(`${label} embedding returned ${values.length} dimensions; expected ${dimensions}`);
   }
 
-  return payload.id;
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new Error(`${label} embedding returned a non-finite numeric value`);
+  }
+
+  const magnitude = Math.hypot(...values);
+
+  if (!Number.isFinite(magnitude) || magnitude === 0) {
+    throw new Error(`${label} embedding returned a zero-length vector`);
+  }
+
+  return values.map((value) => value / magnitude);
 }
 
-export function getChromaPath() {
+function getChromaPath() {
   return optionalEnv("CHROMA_PATH") ?? DEFAULT_CHROMA_PATH;
 }
 
-export function getChromaUrl() {
+function getChromaUrl() {
   const configuredUrl = optionalEnv("CHROMA_URL");
   if (configuredUrl) {
     return configuredUrl;
@@ -113,24 +94,24 @@ async function getCollection(name: string) {
 
   try {
     const client = createChromaClient(url);
-    await ensureCollection(client, name);
-    const collectionId = await getCollectionId(url, name);
+    // embeddingFunction is null because callers always supply pre-computed
+    // vectors; getOrCreateCollection returns a handle usable for upsert/query.
+    const handle = await client.getOrCreateCollection({
+      name,
+      embeddingFunction: null,
+    });
 
     return {
       url,
       path,
       collection: name,
       client,
-      handle: client.collection(collectionId),
+      handle,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Chroma connection failed for ${url} using ${path}: ${message}`);
   }
-}
-
-export async function getFoundationCollection() {
-  return getCollection(COLLECTION_NAME);
 }
 
 export async function getMemoryCollection() {

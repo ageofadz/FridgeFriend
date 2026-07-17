@@ -1,74 +1,103 @@
-import { END, START, StateGraph } from "@langchain/langgraph";
+import { END, START, StateGraph, type RetryPolicy } from "@langchain/langgraph";
 
 import { checkpointer } from "../checkpointer.server";
 import type { StorageImageLocation } from "../images.server";
-import { assertLangSmithTracingEnabled } from "../langsmith.server";
+import { getLangSmithConfig } from "../langsmith.server";
 import { loadPromptBundle } from "../prompts/registry.server";
-import { createAdjudicateLocationsNode } from "./nodes/adjudicate-locations.node";
 import { createDetectInventoryNode } from "./nodes/detect-inventory.node";
+import { createGroundItemPlacementsNode } from "./nodes/ground-item-placements.node";
+import { finalizeScanNode } from "./nodes/finalize-scan.node";
 import { createMapZonesNode } from "./nodes/map-zones.node";
-import { persistScanNode, scanFailedNode } from "./nodes/persist-scan.node";
-import { reconcileLocationsNode } from "./nodes/reconcile-locations.node";
 import { reconcileInventoryNode } from "./nodes/reconcile-inventory.node";
+import { scanFailedNode } from "./nodes/scan-failed.node";
 import { createValidateImagesNode } from "./nodes/validate-images.node";
 import {
   routeAfterImageValidation,
-  routeAfterLocationAdjudication,
-  routeAfterLocationReconciliation,
+  routeAfterInventoryReconciliation,
+  routeAfterPlacementGrounding,
 } from "./routing/scan-routing";
 import { ScanState } from "./state";
 import type { ScanStateValue } from "./state";
+import type { ScanStreamEvent } from "../../workspace/scan-events";
 
-type ScanGraphInput = {
+export type ScanGraphInput = {
   fridgeId: string;
   imageId: string;
   storageLocation: StorageImageLocation;
+};
+
+const scanGraphModelRetryPolicy: RetryPolicy = {
+  maxAttempts: 4,
+  initialInterval: 1000,
+  backoffFactor: 2,
+  jitter: false,
+  logWarning: false,
 };
 
 function scanThreadId(imageId: string) {
   return `scan:${imageId}`;
 }
 
+function scanConfig(input: ScanGraphInput) {
+  const langsmith = getLangSmithConfig();
+  const threadId = scanThreadId(input.imageId);
+
+  return {
+    runName: "scan_storage_image",
+    tags: ["fridgefriend", "scan_graph", "upload_scan"],
+    metadata: {
+      fridgeId: input.fridgeId,
+      imageId: input.imageId,
+      storageLocation: input.storageLocation,
+      thread_id: threadId,
+      ...(langsmith ? { langsmithProject: langsmith.project } : {}),
+    },
+    configurable: {
+      thread_id: threadId,
+    },
+  };
+}
+
+function scanGraphInput(input: ScanGraphInput) {
+  return {
+    fridgeId: input.fridgeId,
+    imageIds: [input.imageId],
+    storageLocation: input.storageLocation,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * The scan pipeline:
+ *
+ * validate_images -> start_scan_analysis -> detect_inventory + map_zones
+ * (parallel) -> reconcile_locations -> [adjudicate_locations] ->
+ * reconcile_inventory -> finalize_scan.
+ *
+ * Every validation failure routes to scan_failed, which records the failing
+ * stage and reason. Database persistence happens in the caller — the graph
+ * only produces the reconciled inventory and checkpoints its state.
+ */
 export async function createScanGraph() {
   const promptBundle = await loadPromptBundle();
 
   return new StateGraph(ScanState)
-    .addNode("validate_images", createValidateImagesNode({ promptBundle }))
+    .addNode("validate_images", createValidateImagesNode({ promptBundle }), {
+      retryPolicy: scanGraphModelRetryPolicy,
+    })
     .addNode("start_scan_analysis", async () => ({ scanStatus: "processing" }))
     .addNode("detect_inventory", createDetectInventoryNode({ promptBundle }), {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 1,
-        backoffFactor: 2,
-      },
+      retryPolicy: scanGraphModelRetryPolicy,
     })
     .addNode("map_zones", createMapZonesNode({ promptBundle }), {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 1,
-        backoffFactor: 2,
-      },
+      retryPolicy: scanGraphModelRetryPolicy,
     })
-    .addNode("reconcile_locations", reconcileLocationsNode)
-    .addNode(
-      "adjudicate_locations",
-      createAdjudicateLocationsNode({ promptBundle }),
-      {
-        retryPolicy: {
-          maxAttempts: 3,
-          initialInterval: 1,
-          backoffFactor: 2,
-        },
-      },
-    )
+    .addNode("ground_item_placements", createGroundItemPlacementsNode())
     .addNode("reconcile_inventory", reconcileInventoryNode)
-    .addNode("persist_scan", persistScanNode, {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 0.5,
-        backoffFactor: 2,
-      },
-    })
+    .addNode("finalize_scan", finalizeScanNode)
     .addNode("scan_failed", scanFailedNode)
     .addEdge(START, "validate_images")
     .addConditionalEdges("validate_images", routeAfterImageValidation, {
@@ -77,140 +106,133 @@ export async function createScanGraph() {
     })
     .addEdge("start_scan_analysis", "detect_inventory")
     .addEdge("start_scan_analysis", "map_zones")
-    .addEdge(["detect_inventory", "map_zones"], "reconcile_locations")
-    .addConditionalEdges(
-      "reconcile_locations",
-      routeAfterLocationReconciliation,
-      {
-        adjudicate_locations: "adjudicate_locations",
-        reconcile_inventory: "reconcile_inventory",
-        scan_failed: "scan_failed",
-      },
-    )
-    .addConditionalEdges("adjudicate_locations", routeAfterLocationAdjudication, {
+    .addEdge(["detect_inventory", "map_zones"], "ground_item_placements")
+    .addConditionalEdges("ground_item_placements", routeAfterPlacementGrounding, {
       reconcile_inventory: "reconcile_inventory",
       scan_failed: "scan_failed",
     })
-    .addEdge("reconcile_inventory", "persist_scan")
-    .addEdge("persist_scan", END)
+    .addConditionalEdges(
+      "reconcile_inventory",
+      routeAfterInventoryReconciliation,
+      {
+        finalize_scan: "finalize_scan",
+        scan_failed: "scan_failed",
+      },
+    )
+    .addEdge("finalize_scan", END)
     .addEdge("scan_failed", END)
     .compile({
       checkpointer,
     });
 }
 
-export async function createScanDisplayGraph() {
-  const promptBundle = await loadPromptBundle();
-
+/**
+ * Minimal single-node graph used only to record the caller's final scan
+ * outcome (the database-saved inventory) into the scan thread's checkpoint.
+ * It shares the scan state schema and checkpointer, so the update lands on
+ * the same thread as the scan run.
+ */
+function createRecordScanOutcomeGraph() {
   return new StateGraph(ScanState)
-    .addNode("validate_images", createValidateImagesNode({ promptBundle }))
-    .addNode("start_scan_analysis", async () => ({ scanStatus: "processing" }))
-    .addNode("detect_inventory", createDetectInventoryNode({ promptBundle }), {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 1,
-        backoffFactor: 2,
-      },
-    })
-    .addNode("map_zones", createMapZonesNode({ promptBundle }), {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 1,
-        backoffFactor: 2,
-      },
-    })
-    .addNode("reconcile_locations", reconcileLocationsNode)
-    .addNode(
-      "adjudicate_locations",
-      createAdjudicateLocationsNode({ promptBundle }),
-      {
-        retryPolicy: {
-          maxAttempts: 3,
-          initialInterval: 1,
-          backoffFactor: 2,
-        },
-      },
-    )
-    .addNode("reconcile_inventory", reconcileInventoryNode)
-    .addNode("scan_failed", scanFailedNode)
-    .addEdge(START, "validate_images")
-    .addConditionalEdges("validate_images", routeAfterImageValidation, {
-      start_scan_analysis: "start_scan_analysis",
-      scan_failed: "scan_failed",
-    })
-    .addEdge("start_scan_analysis", "detect_inventory")
-    .addEdge("start_scan_analysis", "map_zones")
-    .addEdge(["detect_inventory", "map_zones"], "reconcile_locations")
-    .addConditionalEdges(
-      "reconcile_locations",
-      routeAfterLocationReconciliation,
-      {
-        adjudicate_locations: "adjudicate_locations",
-        reconcile_inventory: "reconcile_inventory",
-        scan_failed: "scan_failed",
-      },
-    )
-    .addConditionalEdges("adjudicate_locations", routeAfterLocationAdjudication, {
-      reconcile_inventory: "reconcile_inventory",
-      scan_failed: "scan_failed",
-    })
-    .addEdge("reconcile_inventory", END)
-    .addEdge("scan_failed", END)
-    .compile({
-      checkpointer,
-    });
-}
-
-export function createScanPersistenceGraph() {
-  return new StateGraph(ScanState)
-    .addNode("persist_scan", persistScanNode, {
-      retryPolicy: {
-        maxAttempts: 3,
-        initialInterval: 0.5,
-        backoffFactor: 2,
-      },
-    })
-    .addEdge(START, "persist_scan")
-    .addEdge("persist_scan", END)
+    .addNode("record_scan_outcome", finalizeScanNode)
+    .addEdge(START, "record_scan_outcome")
+    .addEdge("record_scan_outcome", END)
     .compile({
       checkpointer,
     });
 }
 
 export async function runScanForStorageImage(input: ScanGraphInput) {
-  const langsmith = assertLangSmithTracingEnabled();
-  const graph = await createScanDisplayGraph();
-  const threadId = scanThreadId(input.imageId);
+  const graph = await createScanGraph();
 
   return graph.invoke(
-    {
-      fridgeId: input.fridgeId,
-      imageIds: [input.imageId],
-      storageLocation: input.storageLocation,
-    },
-    {
-      runName: "scan_storage_image",
-      tags: ["fridgefriend", "scan_graph", "upload_scan"],
-      metadata: {
-        fridgeId: input.fridgeId,
-        imageId: input.imageId,
-        storageLocation: input.storageLocation,
-        thread_id: threadId,
-        langsmithProject: langsmith.project,
-        langsmithPromptEnvironment: langsmith.promptEnvironment,
-      },
-      configurable: {
-        thread_id: threadId,
-      },
-    },
+    scanGraphInput(input),
+    scanConfig(input),
   );
 }
 
-async function persistScanForFridgeImage(input: ScanGraphInput & {
+export async function* streamScanForStorageImage(
+  input: ScanGraphInput,
+): AsyncGenerator<Exclude<ScanStreamEvent, { type: "image_created" | "complete" }>, ScanStateValue> {
+  const graph = await createScanGraph();
+  const config = scanConfig(input);
+  const stream = await graph.stream(
+    scanGraphInput(input),
+    {
+      ...config,
+      streamMode: "updates",
+    },
+  );
+
+  for await (const update of stream) {
+    if (!isRecord(update)) {
+      throw new Error("Scan graph emitted an update with an invalid shape");
+    }
+
+    const nodeNames = Object.keys(update);
+
+    for (const node of nodeNames) {
+      yield { type: "status", node };
+    }
+
+    const detectionUpdate = update.detect_inventory;
+
+    if (!isRecord(detectionUpdate)) {
+      continue;
+    }
+
+    const detectionValidation = detectionUpdate.detectionValidation;
+    const rawDetections = detectionUpdate.rawDetections;
+
+    if (
+      !isRecord(detectionValidation) ||
+      detectionValidation.valid !== true ||
+      !Array.isArray(rawDetections)
+    ) {
+      continue;
+    }
+
+    yield {
+      type: "raw_detections",
+      imageId: input.imageId,
+      rawDetections: rawDetections as ScanStateValue["rawDetections"],
+    };
+  }
+
+  const state = await graph.getState(config);
+  const values = state.values as ScanStateValue;
+
+  if (values.imageValidation?.valid === false) {
+    yield {
+      type: "invalid_storage_image",
+      reason: values.imageValidation.reason ?? "Image validation failed",
+    };
+    return values;
+  }
+
+  if (values.error) {
+    yield {
+      type: "error",
+      error: values.error.message,
+    };
+    return values;
+  }
+
+  if (!values.inventory) {
+    yield {
+      type: "error",
+      error: "Scan ended without reconciled inventory",
+    };
+  }
+
+  return values;
+}
+
+async function recordScanOutcomeForFridgeImage(input: ScanGraphInput & {
   scanState: ScanStateValue;
 }) {
-  const langsmith = assertLangSmithTracingEnabled();
-  const graph = createScanPersistenceGraph();
+  const langsmith = getLangSmithConfig();
+  const graph = createRecordScanOutcomeGraph();
   const threadId = scanThreadId(input.imageId);
 
   await graph.invoke(
@@ -221,15 +243,14 @@ async function persistScanForFridgeImage(input: ScanGraphInput & {
       storageLocation: input.storageLocation,
     },
     {
-      runName: "persist_scan_background",
-      tags: ["fridgefriend", "scan_graph", "persist_scan"],
+      runName: "record_scan_outcome_background",
+      tags: ["fridgefriend", "scan_graph", "record_scan_outcome"],
       metadata: {
         fridgeId: input.fridgeId,
         imageId: input.imageId,
         storageLocation: input.storageLocation,
         thread_id: threadId,
-        langsmithProject: langsmith.project,
-        langsmithPromptEnvironment: langsmith.promptEnvironment,
+        ...(langsmith ? { langsmithProject: langsmith.project } : {}),
       },
       configurable: {
         thread_id: threadId,
@@ -238,14 +259,19 @@ async function persistScanForFridgeImage(input: ScanGraphInput & {
   );
 }
 
+/**
+ * Records the final scan state (including the database-saved inventory) on
+ * the scan thread's checkpoint without blocking the caller's response. The
+ * database write itself happens before this call, in the upload route.
+ */
 export function persistScanForFridgeImageInBackground(
   input: ScanGraphInput & { scanState: ScanStateValue },
 ) {
   setTimeout(() => {
-    void persistScanForFridgeImage(input).catch((error) => {
+    void recordScanOutcomeForFridgeImage(input).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error(
-        `Background persist_scan failed for image ${input.imageId}: ${message}`,
+        `Background scan-outcome recording failed for image ${input.imageId}: ${message}`,
       );
     });
   }, 0);

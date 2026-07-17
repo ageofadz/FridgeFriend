@@ -1,14 +1,11 @@
 import type { LoaderFunctionArgs } from "react-router";
 
+import { jsonError } from "../server/http.server";
 import {
   InventoryCropError,
   jpegDataUrlToBytes,
   resolveInventoryCropDataUrl,
 } from "../server/query/services/focused-visual-context.server";
-
-function jsonError(error: string, status: number) {
-  return Response.json({ error }, { status });
-}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);

@@ -2,11 +2,11 @@ import { createReadStream } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { buildRecipeRetrievalText, normalizeIngredientName, normalizeRecipeTag } from "./normalization";
-import type { Recipe, RecipeNutrition, RecipeRatingAggregate } from "./types";
+import { normalizeIngredientName, normalizeRecipeTag } from "./normalization";
+import type { Recipe, RecipeNutrition, RecipeRating } from "./types";
 
-export const RAW_RECIPES_FILENAME = "RAW_recipes.csv";
-export const RAW_INTERACTIONS_FILENAME = "RAW_interactions.csv";
+const RAW_RECIPES_FILENAME = "RAW_recipes.csv";
+const RAW_INTERACTIONS_FILENAME = "RAW_interactions.csv";
 
 type CsvRecord = Record<string, string>;
 
@@ -20,7 +20,7 @@ export type FoodComDatasetFiles = {
   interactionsPath: string;
 };
 
-export type FoodComRecipeLoadOptions = {
+type FoodComRecipeLoadOptions = {
   dataDir: string;
   limit?: number;
 };
@@ -325,7 +325,7 @@ function requiredValue(record: CsvRecord, field: string, recipeId: string) {
   return value;
 }
 
-function parseRecipeRecord(record: CsvRecord, ratings: Map<string, RecipeRatingAggregate>): Recipe {
+function parseRecipeRecord(record: CsvRecord, ratings: Map<string, RecipeRating>): Recipe {
   const id = requiredValue(record, "id", "unknown").trim();
   const name = requiredValue(record, "name", id).trim();
   const minutes = parseNumber(requiredValue(record, "minutes", id), "minutes", id);
@@ -369,7 +369,7 @@ function parseRecipeRecord(record: CsvRecord, ratings: Map<string, RecipeRatingA
   };
 }
 
-export function isQualityRecipe(recipe: Recipe): boolean {
+function isQualityRecipe(recipe: Recipe): boolean {
   return recipe.minutes > 0 &&
     recipe.minutes <= 180 &&
     recipe.ingredients.length >= 3 &&
@@ -400,7 +400,7 @@ function compareRecipes(left: Recipe, right: Recipe) {
   return left.id.localeCompare(right.id);
 }
 
-export function selectFoodComRecipes(recipes: Recipe[], limit?: number): Recipe[] {
+function selectFoodComRecipes(recipes: Recipe[], limit?: number): Recipe[] {
   if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
     throw new Error(`Food.com recipe index limit must be a positive integer; received ${limit}`);
   }
@@ -408,7 +408,7 @@ export function selectFoodComRecipes(recipes: Recipe[], limit?: number): Recipe[
   return recipes.filter(isQualityRecipe).sort(compareRecipes).slice(0, limit);
 }
 
-export async function aggregateFoodComRatings(interactionsPath: string): Promise<Map<string, RecipeRatingAggregate>> {
+async function aggregateFoodComRatings(interactionsPath: string): Promise<Map<string, RecipeRating>> {
   const accumulators = new Map<string, RatingAccumulator>();
 
   for await (const record of parseCsvRecords(interactionsPath, ["recipe_id", "rating"])) {
@@ -468,8 +468,4 @@ export async function loadFoodComRecipes(options: FoodComRecipeLoadOptions): Pro
   }
 
   return selectFoodComRecipes(recipes, options.limit);
-}
-
-export function buildFoodComRetrievalDocument(recipe: Recipe): string {
-  return buildRecipeRetrievalText(recipe);
 }

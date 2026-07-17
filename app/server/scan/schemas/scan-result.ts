@@ -3,9 +3,11 @@ import { z } from "zod";
 import {
   FridgeZoneDetection,
   FridgeZoneMap,
+  GroundedPlacement,
   PredictedZoneHint,
   RawDetection,
   RELATIVE_ZONE_POSITIONS,
+  MINIMUM_SUPPORT_ZONE_WIDTH_RATIO,
   ZoneType,
 } from "./inventory";
 
@@ -18,6 +20,17 @@ const BOX_JSON_SCHEMA = {
     height: { type: "number" },
   },
   required: ["x", "y", "width", "height"],
+} as const;
+
+const ZONE_BOX_JSON_SCHEMA = {
+  ...BOX_JSON_SCHEMA,
+  properties: {
+    ...BOX_JSON_SCHEMA.properties,
+    width: {
+      type: "number",
+      minimum: MINIMUM_SUPPORT_ZONE_WIDTH_RATIO,
+    },
+  },
 } as const;
 
 const ZONE_TYPES = ZoneType.options;
@@ -37,38 +50,6 @@ export const InventoryDetectionResponseSchema = {
           name: { type: "string" },
           conf: { type: "number" },
           bbox: BOX_JSON_SCHEMA,
-          zone: {
-            type: "object",
-            properties: {
-              zoneType: {
-                type: "string",
-                format: "enum",
-                enum: ZONE_TYPES,
-              },
-              relativePosition: {
-                type: "string",
-                format: "enum",
-                enum: RELATIVE_ZONE_POSITIONS,
-                nullable: true,
-              },
-              confidence: { type: "number" },
-            },
-            description:
-              "Optional weak evidence about the storage zone. This is not authoritative.",
-            nullable: true,
-            required: ["zoneType", "relativePosition", "confidence"],
-          },
-          stack: {
-            type: "object",
-            properties: {
-              on: { type: "string" },
-              conf: { type: "number" },
-              why: { type: "string" },
-            },
-            description:
-              "Optional weak evidence that this item is physically stacked on top of another detected item.",
-            required: ["on", "conf", "why"],
-          },
           pack: {
             type: "string",
             format: "enum",
@@ -95,7 +76,6 @@ export const InventoryDetectionResponseSchema = {
           "name",
           "conf",
           "bbox",
-          "zone",
           "pack",
           "qty",
         ],
@@ -128,8 +108,6 @@ const InventoryDetectionModelRawDetection = z.object({
   name: z.string(),
   conf: z.number().min(0).max(1),
   bbox: InventoryDetectionModelBoundingBox,
-  zone: PredictedZoneHint.nullable(),
-  stack: RawDetection.shape.stack,
   pack: z.enum([
     "loose",
     "bottle",
@@ -169,7 +147,8 @@ export const ZoneMapResponseSchema = {
             format: "enum",
             enum: ZONE_TYPES,
           },
-          bbox: BOX_JSON_SCHEMA,
+          bbox: ZONE_BOX_JSON_SCHEMA,
+          surfaceY: { type: "number" },
           ord: {
             type: "number",
             nullable: true,
@@ -183,6 +162,7 @@ export const ZoneMapResponseSchema = {
           "img",
           "type",
           "bbox",
+          "surfaceY",
           "ord",
           "name",
           "conf",
@@ -224,6 +204,41 @@ export const LocationAdjudicationResponseSchema = {
   required: ["decisions"],
 } as const;
 
+export const GroundItemPlacementsResponseSchema = {
+  type: "object",
+  properties: {
+    placements: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          detectionId: { type: "string" },
+          status: { type: "string", format: "enum", enum: ["placed", "needs_review"] },
+          supportKind: { type: "string", format: "enum", enum: ["zone", "item"] },
+          supportId: { type: "string" },
+          depth: {
+            type: "object",
+            properties: { back: { type: "number" }, front: { type: "number" } },
+            required: ["back", "front"],
+          },
+          reason: { type: "string" },
+          confidence: { type: "number" },
+        },
+        required: ["detectionId", "status", "confidence"],
+      },
+    },
+  },
+  required: ["placements"],
+} as const;
+
+export const GroundItemPlacementsModelResult = z.object({
+  placements: z.array(GroundedPlacement),
+});
+
+export type GroundItemPlacementsModelResultValue = z.infer<
+  typeof GroundItemPlacementsModelResult
+>;
+
 export const ZoneMapModelResult = FridgeZoneMap;
 
 export const LocationAdjudicationDecision = z.object({
@@ -241,8 +256,8 @@ export const ZoneMatch = z.object({
   detectionId: z.string(),
   zoneDetectionId: z.string(),
   score: z.number(),
-  containmentRatio: z.number().min(0).max(1),
-  centerContained: z.boolean(),
+  surfaceDistance: z.number().min(0),
+  horizontalOverlapRatio: z.number().min(0).max(1),
 });
 
 export const ReconciledLocation = z.discriminatedUnion("status", [
@@ -257,6 +272,11 @@ export const ReconciledLocation = z.discriminatedUnion("status", [
     status: z.literal("ambiguous"),
     detectionId: z.string(),
     candidates: z.array(ZoneMatch).min(1),
+    reason: z.string(),
+  }),
+  z.object({
+    status: z.literal("needs_review"),
+    detectionId: z.string(),
     reason: z.string(),
   }),
   z.object({
@@ -285,14 +305,14 @@ export const ScanError = z.object({
     "validate_images",
     "detect_inventory",
     "map_zones",
+    "ground_item_placements",
     "reconcile_locations",
     "adjudicate_locations",
     "reconcile_inventory",
-    "persist_scan",
+    "finalize_scan",
   ]),
   code: z.string(),
   message: z.string(),
-  retryable: z.boolean(),
 });
 
 export type ValidationResult = z.infer<typeof ValidationResult>;

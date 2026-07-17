@@ -1,4 +1,5 @@
 import {
+  hasActiveSemanticMemories,
   listMemoryContext,
   listSemanticMemoriesByIds,
 } from "./repository.server";
@@ -9,6 +10,14 @@ export async function loadMemoryContextForQuery(input: {
   fridgeId: string;
   query: string;
 }) {
+  if (!hasActiveSemanticMemories(input)) {
+    return listMemoryContext({
+      userId: input.userId,
+      fridgeId: input.fridgeId,
+      semanticMemories: [],
+    });
+  }
+
   const semanticMemoryIds = await searchSemanticMemoryIds({
     userId: input.userId,
     fridgeId: input.fridgeId,

@@ -1,27 +1,5 @@
 import { z } from "zod";
 
-export const VISION_MODEL = "gemini-3.5-flash";
-export const IMAGE_VALIDATION_MODEL = "gemini-3.1-flash-lite-preview";
-export const INVENTORY_REVIEW_STATUS_COLORS = {
-  needs_review: 0xb7791f,
-  unmatched: 0x7a869a,
-} as const;
-
-export const INVENTORY_PACKAGING_COLORS = {
-  bottle: 0x3a86ff,
-  jar: 0x65a30d,
-  carton: 0xf59e0b,
-  bag: 0xd946ef,
-  box: 0x14b8a6,
-  tray: 0xef4444,
-  container: 0x8b5cf6,
-  loose: 0x22c55e,
-  can: 0x64748b,
-  unknown: 0x94a3b8,
-} as const;
-
-export const DEFAULT_INVENTORY_ITEM_COLOR = INVENTORY_PACKAGING_COLORS.unknown;
-
 export const RELATIVE_ZONE_POSITIONS = [
   "top",
   "middle",
@@ -40,7 +18,9 @@ export const ZoneType = z.enum([
   "unknown",
 ]);
 
-export const RelativeZonePosition = z.enum(RELATIVE_ZONE_POSITIONS);
+export const MINIMUM_SUPPORT_ZONE_WIDTH_RATIO = 0.04;
+
+const RelativeZonePosition = z.enum(RELATIVE_ZONE_POSITIONS);
 
 export const NormalizedBoundingBox = z.object({
   x: z.number().min(0).max(1),
@@ -63,7 +43,7 @@ export const PredictedZoneHint = z.object({
   confidence: z.number().min(0).max(1),
 });
 
-export const StackingHint = z.object({
+const StackingHint = z.object({
   on: z.string(),
   conf: z.number().min(0).max(1),
   why: z.string(),
@@ -75,7 +55,7 @@ export const RawDetection = z.object({
   name: z.string(),
   conf: z.number().min(0).max(1),
   bbox: BoundingBox,
-  zone: PredictedZoneHint.nullable(),
+  zone: PredictedZoneHint.nullable().optional(),
   stack: StackingHint.optional(),
   pack: z
     .enum([
@@ -97,10 +77,19 @@ export const FridgeZoneDetection = z.object({
   img: z.string(),
   type: ZoneType,
   bbox: BoundingBox,
+  surfaceY: z.number().min(0).max(1).optional(),
   ord: z.number().int().nonnegative().nullable(),
   name: z.string(),
   conf: z.number().min(0).max(1),
   partial: z.boolean().default(false),
+}).superRefine((zone, context) => {
+  if (zone.bbox.width < MINIMUM_SUPPORT_ZONE_WIDTH_RATIO) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["bbox", "width"],
+      message: `Support zone width must be at least ${MINIMUM_SUPPORT_ZONE_WIDTH_RATIO}`,
+    });
+  }
 });
 
 export const FridgeZoneMap = z.object({
@@ -108,7 +97,7 @@ export const FridgeZoneMap = z.object({
   zones: z.array(FridgeZoneDetection),
 });
 
-export const InventoryLocationObservation = z.object({
+const InventoryLocationObservation = z.object({
   imageId: z.string(),
   depthBackRatio: z.number().min(0).max(1).nullable(),
   boundingBox: z.object({
@@ -119,15 +108,61 @@ export const InventoryLocationObservation = z.object({
   }),
 });
 
-export const InventoryLocation = z.object({
+const InventoryLocation = z.object({
   status: z.enum(["matched", "unmatched", "needs_review"]),
   zoneId: z.string().nullable(),
   zoneType: ZoneType.nullable(),
   observations: z.array(InventoryLocationObservation),
   confidence: z.number().min(0).max(1).nullable(),
+  assignment: z.object({
+    source: z.enum(["scan", "user_confirmed"]),
+    planId: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+  }).optional(),
 });
 
-export const QuantityEstimate = z.object({
+const SceneDepthInterval = z.object({
+  back: z.number().min(0).max(1),
+  front: z.number().min(0).max(1),
+}).refine(({ back, front }) => back < front, {
+  message: "Scene depth interval must have back less than front",
+});
+
+export const GroundedPlacement = z.discriminatedUnion("status", [
+  z.object({
+    detectionId: z.string(),
+    status: z.literal("placed"),
+    supportKind: z.enum(["zone", "item"]),
+    supportId: z.string(),
+    depth: SceneDepthInterval,
+    confidence: z.number().min(0).max(1),
+  }),
+  z.object({
+    detectionId: z.string(),
+    status: z.literal("needs_review"),
+    reason: z.string().min(1),
+    confidence: z.number().min(0).max(1),
+  }),
+]);
+
+export type GroundedPlacementValue = z.infer<typeof GroundedPlacement>;
+
+const InventoryScenePlacement = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("placed"),
+    supportKind: z.enum(["zone", "item"]),
+    supportId: z.string(),
+    depth: SceneDepthInterval,
+    confidence: z.number().min(0).max(1),
+  }),
+  z.object({
+    status: z.literal("needs_review"),
+    reason: z.string().min(1),
+    confidence: z.number().min(0).max(1),
+  }),
+]);
+
+const QuantityEstimate = z.object({
   amount: z.number().nonnegative().nullable(),
   unit: z.enum([
     "count",
@@ -210,6 +245,7 @@ export const InventoryItem = z.object({
     "unknown",
   ]),
   stack: StackingHint.optional(),
+  scene: InventoryScenePlacement.optional(),
   loc: InventoryLocation,
   conf: z.number().min(0).max(1),
   src: z.array(z.string()),
@@ -231,9 +267,10 @@ export const Inventory = z.object({
   id: z.string(),
   fridgeId: z.string(),
   scanId: z.string(),
-  source: z.enum(["mocked-vision", "gemini-vision"]),
+  source: z.enum(["mocked-vision", "gemini-vision", "anthropic-vision"]),
   model: z.string(),
   createdAt: z.string(),
+  sceneVersion: z.literal("image-grounded-v2").optional(),
   items: z.array(InventoryItem),
   zones: z.array(
     z.object({
@@ -242,6 +279,7 @@ export const Inventory = z.object({
       label: z.string(),
       order: z.number().nullable(),
       boundingBox: BoundingBox,
+      surfaceY: z.number().min(0).max(1).optional(),
       imageIds: z.array(z.string()),
       sourceZoneDetectionIds: z.array(z.string()),
       confidence: z.number().min(0).max(1),
@@ -260,18 +298,4 @@ export type VisualEnrichment = z.infer<typeof VisualEnrichment>;
 export type InventoryEnrichment = z.infer<typeof InventoryEnrichment>;
 export type InventoryEnrichmentField = z.infer<typeof InventoryEnrichmentField>;
 export type NormalizedBoundingBox = z.infer<typeof NormalizedBoundingBox>;
-export type StackingHint = z.infer<typeof StackingHint>;
 export type ZoneType = z.infer<typeof ZoneType>;
-
-export function inventoryItemColor(item: InventoryItem) {
-  if (item.loc.status === "needs_review") {
-    return INVENTORY_REVIEW_STATUS_COLORS.needs_review;
-  }
-
-  if (item.loc.status === "unmatched") {
-    return INVENTORY_REVIEW_STATUS_COLORS.unmatched;
-  }
-
-  return INVENTORY_PACKAGING_COLORS[item.pack] ??
-    DEFAULT_INVENTORY_ITEM_COLOR;
-}

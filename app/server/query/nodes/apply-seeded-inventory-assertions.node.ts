@@ -1,9 +1,9 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { getWriter } from "@langchain/langgraph";
 import { z } from "zod";
 
-import { ConversationContextSchema } from "../../../workspace/contracts";
 import type { QueryGraphDependencies } from "../schemas/query";
+import { promptMessages } from "../../scan/services/prompt-messages.server";
+import { conversationContextFromState } from "../services/conversation-context.server";
 import { createQueryModel } from "../services/query-model.server";
 import {
   applySeededInventoryAssertions,
@@ -19,12 +19,11 @@ const SeededInventoryAssertionsSchema = z.object({
 });
 
 function selectedItems(state: FridgeQueryStateValue) {
-  return ConversationContextSchema.catch({
-    selectedItemIds: [],
-    selectedZoneIds: [],
-    selectedRecipeId: null,
-    seededItems: [],
-  }).parse(state.context.conversationContext).seededItems;
+  return conversationContextFromState(state).seededItems;
+}
+
+function seededInventoryAssertionOperationKey(state: FridgeQueryStateValue) {
+  return `seeded_inventory_assertions:${state.threadId}:${state.query}:${JSON.stringify(selectedItems(state))}`;
 }
 
 export function createApplySeededInventoryAssertionsNode(
@@ -34,41 +33,50 @@ export function createApplySeededInventoryAssertionsNode(
     state: FridgeQueryStateValue,
   ) {
     const seededItems = selectedItems(state);
+    const operationKey = seededInventoryAssertionOperationKey(state);
 
-    if (seededItems.length === 0) {
+    if (seededItems.length === 0 || state.completedOperationKeys.includes(operationKey)) {
       return {};
     }
 
     const model = deps.seededInventoryAssertionModel ?? createQueryModel();
+    const loadedPrompt = deps.promptBundle?.seededInventoryAssertions;
+    if (!loadedPrompt) throw new Error("Seeded inventory assertions prompt is unavailable.");
     const structuredModel = model.withStructuredOutput(
       SeededInventoryAssertionsSchema,
       { name: "SeededInventoryAssertions" },
     );
 
     try {
-      const result = await structuredModel.invoke([
-        new SystemMessage("Extract direct, unambiguous user identity assertions about the selected inventory crops. Return one assertion for every selected crop the user is identifying or correcting. Do not infer labels from questions, requests, uncertainty, or general discussion. Only use cropId values supplied in the selected crop context."),
-        new HumanMessage(JSON.stringify({
+      const result = await structuredModel.invoke(await promptMessages(loadedPrompt, {
+        seeded_inventory_assertion_context_json: JSON.stringify({
           query: state.query,
           selectedCrops: seededItems.map((item) => ({
             cropId: item.cropId,
             currentItemId: item.itemId,
           })),
-        })),
-      ], {
+        }),
+      }), {
         tags: ["query", "apply_seeded_inventory_assertions"],
         metadata: {
           fridgeId: state.fridgeId,
           imageId: state.imageId,
+          langsmithPromptName: loadedPrompt.name,
+          langsmithPromptRef: loadedPrompt.ref,
         },
       });
       const parsed = SeededInventoryAssertionsSchema.safeParse(result);
 
       if (!parsed.success) {
+        const error = `Selected inventory assertion extraction returned invalid output: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`;
+        getWriter()?.({ type: "agent_event", event: {
+          type: "inventory_assertion_failed",
+          error,
+        } });
         return {
           context: {
             ...state.context,
-            seededInventoryAssertionError: `Selected inventory assertion extraction returned invalid output: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+            seededInventoryAssertionError: error,
           },
         };
       }
@@ -91,6 +99,7 @@ export function createApplySeededInventoryAssertionsNode(
       }
 
       return {
+        completedOperationKeys: [...state.completedOperationKeys, operationKey],
         context: {
           ...state.context,
           seededInventoryAssertions: applied,
@@ -98,10 +107,15 @@ export function createApplySeededInventoryAssertionsNode(
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const assertionError = `Selected inventory assertion could not be applied: ${message}`;
+      getWriter()?.({ type: "agent_event", event: {
+        type: "inventory_assertion_failed",
+        error: assertionError,
+      } });
       return {
         context: {
           ...state.context,
-          seededInventoryAssertionError: `Selected inventory assertion could not be applied: ${message}`,
+          seededInventoryAssertionError: assertionError,
         },
       };
     }

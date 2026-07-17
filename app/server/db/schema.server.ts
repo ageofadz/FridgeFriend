@@ -1,11 +1,5 @@
 import { primaryKey, real, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
-export const appFoundation = sqliteTable("app_foundation", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
-
 export const fridgeImages = sqliteTable("fridge_images", {
   id: text("id").primaryKey(),
   dataUrl: text("data_url").notNull(),
@@ -19,6 +13,39 @@ export const fridgeInventories = sqliteTable("fridge_inventories", {
   imageId: text("image_id").primaryKey(),
   inventoryId: text("inventory_id").notNull(),
   inventoryJson: text("inventory_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const kitchenOrganizationPlans = sqliteTable("kitchen_organization_plans", {
+  id: text("id").primaryKey(),
+  requestId: text("request_id").notNull(),
+  userId: text("user_id").notNull(),
+  fridgeId: text("fridge_id").notNull(),
+  imageId: text("image_id").notNull(),
+  inventoryFingerprint: text("inventory_fingerprint").notNull(),
+  status: text("status").notNull(),
+  planJson: text("plan_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  completedAt: text("completed_at"),
+});
+
+export const fridgeChatThreads = sqliteTable("fridge_chat_threads", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  fridgeId: text("fridge_id").notNull(),
+  imageId: text("image_id"),
+  executionStatus: text("execution_status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const fridgeChatMessages = sqliteTable("fridge_chat_messages", {
+  id: text("id").primaryKey(),
+  threadId: text("thread_id").notNull(),
+  role: text("role").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  status: text("status").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

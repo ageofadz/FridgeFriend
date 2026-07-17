@@ -1,0 +1,23 @@
+node_modules
+build
+.react-router
+.data/*
+!.data/fridgefriend.sqlite
+!.data/demo-corpus.seed.json
+!.data/chroma/
+!.data/chroma/**
+.env*
+.git
+.github
+compose.yaml
+compose.local.yaml
+*.log
+*.md
+**/*.md
+**/__pycache__/
+*.pyc
+Agentic Features
+Memory Flow.md
+RAG spec.md
+RAG spec 2 - tournament.md
+UI

@@ -1,15 +1,16 @@
 import {
-  VISION_MODEL,
   type FridgeZoneDetection,
+  type GroundedPlacementValue,
   type Inventory,
   type InventoryItem,
   type RawDetection,
 } from "../schemas/inventory";
+import {
+  CHAT_VISION_PROVIDER,
+  CHAT_VISION_MODEL as VISION_MODEL,
+  chatProviderSource,
+} from "../../ai/chat-model.server";
 import { categorizeInventoryForRecipes } from "../../recipes/inventory-generalization";
-import type {
-  LocationAdjudicationDecision,
-  ReconciledLocation,
-} from "../schemas/scan-result";
 import type { ScanStateValue } from "../state";
 
 function clampRatio(value: number) {
@@ -137,13 +138,6 @@ function humanReadableZoneLabel(
   return `${vertical} ${type}`;
 }
 
-function depthBackRatioForBoxInZone(
-  itemBox: RawDetection["bbox"] | InventoryItem["loc"]["observations"][number]["boundingBox"],
-  zoneBox: FridgeZoneDetection["bbox"],
-) {
-  return clampRatio((itemBox.y + itemBox.height - zoneBox.y) / zoneBox.height);
-}
-
 function itemZoneXInterval(
   itemBox: InventoryItem["loc"]["observations"][number]["boundingBox"],
   zoneBox: FridgeZoneDetection["bbox"],
@@ -228,30 +222,13 @@ function createInventoryZones(
       label: humanReadableZoneLabel(zone, zoneMap.zones),
       order: zone.ord,
       boundingBox: zone.bbox,
+      surfaceY: zone.surfaceY,
       imageIds: [zone.img],
       sourceZoneDetectionIds: [zone.id],
       confidence: zone.conf,
       estimatedCapacityRatio: null,
       estimatedOccupiedRatio: estimateZoneOccupiedRatio(zone, items),
     })),
-  );
-}
-
-function findDetectionLocation(
-  detection: RawDetection,
-  reconciledLocations: ReconciledLocation[],
-) {
-  return reconciledLocations.find(
-    (location) => location.detectionId === detection.id,
-  );
-}
-
-function findAdjudicationDecision(
-  detection: RawDetection,
-  adjudicationDecisions: LocationAdjudicationDecision[],
-) {
-  return adjudicationDecisions.find(
-    (decision) => decision.detectionId === detection.id,
   );
 }
 
@@ -264,15 +241,13 @@ function findZone(
 
 function createLocation(
   detection: RawDetection,
-  reconciledLocations: ReconciledLocation[],
-  adjudicationDecisions: LocationAdjudicationDecision[],
+  placement: GroundedPlacementValue | undefined,
   zones: FridgeZoneDetection[],
+  placementByDetectionId: Map<string, GroundedPlacementValue>,
 ): InventoryItem["loc"] {
-  const observationForZone = (zone: FridgeZoneDetection | null) => ({
+  const observation = (depthBackRatio: number | null) => ({
     imageId: detection.img,
-    depthBackRatio: zone
-      ? depthBackRatioForBoxInZone(detection.bbox, zone.bbox)
-      : null,
+    depthBackRatio,
     boundingBox: {
       x: detection.bbox.x,
       y: detection.bbox.y,
@@ -280,74 +255,46 @@ function createLocation(
       height: detection.bbox.height,
     },
   });
-  const location = findDetectionLocation(detection, reconciledLocations);
-
-  if (!location) {
-    return {
-      status: "unmatched",
-      zoneId: null,
-      zoneType: null,
-      observations: [observationForZone(null)],
-      confidence: null,
-    };
+  function resolveBaseZone(candidate: GroundedPlacementValue | undefined, seen = new Set<string>()): FridgeZoneDetection | null {
+    if (!candidate || candidate.status !== "placed") return null;
+    if (candidate.supportKind === "zone") return findZone(candidate.supportId, zones) ?? null;
+    if (seen.has(candidate.supportId)) return null;
+    seen.add(candidate.supportId);
+    return resolveBaseZone(placementByDetectionId.get(candidate.supportId), seen);
   }
 
-  if (location.status === "matched") {
-    return {
-      status: "matched",
-      zoneId: location.zone.id,
-      zoneType: location.zone.type,
-      observations: [observationForZone(location.zone)],
-      confidence: location.score,
-    };
-  }
+  const zone = resolveBaseZone(placement);
 
-  if (location.status === "ambiguous") {
-    const decision = findAdjudicationDecision(detection, adjudicationDecisions);
-
-    if (decision?.selectedZoneDetectionId) {
-      const zone = findZone(decision.selectedZoneDetectionId, zones);
-
-      if (zone) {
-        return {
-          status: "matched",
-          zoneId: zone.id,
-          zoneType: zone.type,
-          observations: [observationForZone(zone)],
-          confidence: decision.confidence,
-        };
-      }
-    }
-
+  if (!placement || placement.status !== "placed" || !zone) {
     return {
       status: "needs_review",
       zoneId: null,
       zoneType: null,
-      observations: [observationForZone(null)],
-      confidence: decision?.confidence ?? null,
+      observations: [observation(null)],
+      confidence: placement?.confidence ?? null,
     };
   }
 
   return {
-    status: "unmatched",
-    zoneId: null,
-    zoneType: null,
-    observations: [observationForZone(null)],
-    confidence: null,
+    status: "matched",
+    zoneId: zone.id,
+    zoneType: zone.type,
+    observations: [observation(placement.depth.back)],
+    confidence: placement.confidence,
   };
 }
 
 function createInventoryItem(
   detection: RawDetection,
-  reconciledLocations: ReconciledLocation[],
-  adjudicationDecisions: LocationAdjudicationDecision[],
+  placement: GroundedPlacementValue | undefined,
   zones: FridgeZoneDetection[],
+  placementByDetectionId: Map<string, GroundedPlacementValue>,
 ): InventoryItem {
   const location = createLocation(
     detection,
-    reconciledLocations,
-    adjudicationDecisions,
+    placement,
     zones,
+    placementByDetectionId,
   );
   const isUnidentified = isUnidentifiedInventoryLabel(detection.name);
   const recipeCategory = categorizeInventoryForRecipes({
@@ -368,7 +315,21 @@ function createInventoryItem(
       fillLevel: null,
     },
     pack: detection.pack,
-    stack: detection.stack,
+    ...(placement ? {
+      scene: placement.status === "placed"
+        ? {
+          status: "placed" as const,
+          supportKind: placement.supportKind,
+          supportId: placement.supportId,
+          depth: placement.depth,
+          confidence: placement.confidence,
+        }
+        : {
+          status: "needs_review" as const,
+          reason: placement.reason,
+          confidence: placement.confidence,
+        },
+    } : {}),
     loc: location,
     conf: detection.conf,
     src: [detection.id],
@@ -387,102 +348,36 @@ function createInventoryItem(
   };
 }
 
-function stackedDepthBackRatio(
-  item: InventoryItem,
-  observation: InventoryItem["loc"]["observations"][number],
-  itemsById: Map<string, InventoryItem>,
-  visiting: Set<string>,
-): number | null {
-  const supportItemId = item.stack?.on;
-
-  if (!supportItemId) {
-    return observation.depthBackRatio;
-  }
-
-  const visitKey = `${item.id}:${observation.imageId}`;
-
-  if (visiting.has(visitKey)) {
-    throw new Error(`Cannot align stacked depth for item ${item.id} because its stack references form a cycle`);
-  }
-
-  const supportItem = itemsById.get(supportItemId);
-
-  if (!supportItem) {
-    throw new Error(`Cannot align stacked depth for item ${item.id} because support item ${supportItemId} was not found`);
-  }
-
-  const supportObservation = supportItem.loc.observations.find(
-    (candidate) => candidate.imageId === observation.imageId,
-  );
-
-  if (!supportObservation) {
-    throw new Error(`Cannot align stacked depth for item ${item.id} because support item ${supportItemId} has no observation for image ${observation.imageId}`);
-  }
-
-  visiting.add(visitKey);
-
-  try {
-    return stackedDepthBackRatio(
-      supportItem,
-      supportObservation,
-      itemsById,
-      visiting,
-    );
-  } finally {
-    visiting.delete(visitKey);
-  }
-}
-
-function alignStackedDepthRatios(items: InventoryItem[]) {
-  const itemsById = new Map(items.map((item) => [item.id, item]));
-
-  return items.map((item) => {
-    if (!item.stack?.on) {
-      return item;
-    }
-
-    return {
-      ...item,
-      loc: {
-        ...item.loc,
-        observations: item.loc.observations.map((observation) => ({
-          ...observation,
-          depthBackRatio: stackedDepthBackRatio(
-            item,
-            observation,
-            itemsById,
-            new Set(),
-          ),
-        })),
-      },
-    };
-  });
-}
-
 export async function reconcileInventory(state: ScanStateValue): Promise<{
   inventory: Inventory;
 }> {
   const zones = state.zoneMaps.flatMap((zoneMap) => zoneMap.zones);
+  const placementByDetectionId = new Map(
+    (state.groundedPlacements ?? []).map((placement) => [placement.detectionId, placement]),
+  );
   const detectedItems = state.rawDetections.map((detection) =>
     createInventoryItem(
       detection,
-      state.reconciledLocations,
-      state.adjudicationDecisions,
+      placementByDetectionId.get(detection.id),
       zones,
+      placementByDetectionId,
     ),
   );
-  const items = alignStackedDepthRatios(detectedItems);
-
+  const provisionalInventory = {
+    id: `inventory:${state.fridgeId}:${state.imageIds.join(",")}`,
+    fridgeId: state.fridgeId,
+    scanId: `scan:${state.imageIds.join(",")}`,
+    source: chatProviderSource(CHAT_VISION_PROVIDER),
+    createdAt: new Date().toISOString(),
+    model: VISION_MODEL,
+    sceneVersion: "image-grounded-v2",
+    items: detectedItems,
+    zones: createInventoryZones(state.zoneMaps, detectedItems),
+  } satisfies Inventory;
   return {
     inventory: {
-      id: `inventory:${state.fridgeId}:${state.imageIds.join(",")}`,
-      fridgeId: state.fridgeId,
-      scanId: `scan:${state.imageIds.join(",")}`,
-      source: "gemini-vision",
-      createdAt: new Date().toISOString(),
-      model: VISION_MODEL,
-      items,
-      zones: createInventoryZones(state.zoneMaps, items),
+      ...provisionalInventory,
+      zones: createInventoryZones(state.zoneMaps, provisionalInventory.items),
     },
   };
 }

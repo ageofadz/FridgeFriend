@@ -1,25 +1,12 @@
 import { getFridgeInventoryForImage } from "../../inventories.server";
 import type { Inventory } from "../../scan/schemas/inventory";
-import {
-  ConversationContextSchema,
-  type ConversationContextSeededItem,
-} from "../../../workspace/contracts";
+import type { ConversationContextSeededItem } from "../../../workspace/contracts";
 import type { QueryGraphDependencies } from "../schemas/query";
 import type { FridgeQueryStateValue } from "../state";
+import { conversationContextFromState } from "./conversation-context.server";
 
 function seededItemsFromState(state?: FridgeQueryStateValue) {
-  if (!state) {
-    return [];
-  }
-
-  return ConversationContextSchema.catch({
-    selectedItemIds: [],
-    selectedZoneIds: [],
-    selectedRecipeId: null,
-    seededItems: [],
-  })
-    .parse(state.context.conversationContext)
-    .seededItems;
+  return state ? conversationContextFromState(state).seededItems : [];
 }
 
 function seedMatchesItem(

@@ -1,6 +1,6 @@
-import type { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { z } from "zod";
 
+import type { FridgeFriendChatModel } from "../../ai/chat-model.server";
 import type { Recipe, RecipeCandidate } from "../../recipes/types";
 import type { HouseholdInventoryOperationResult } from "../../memory/repository.server";
 import type { PromptBundle } from "../../prompts/registry.server";
@@ -16,37 +16,48 @@ import type {
   SeededInventoryAssertion,
 } from "../services/seeded-inventory-assertion.server";
 import {
-  AgentActivityEventSchema,
   ConversationContextSchema,
   WorkspaceActionSchema,
-  type AgentActivityEvent,
   type ConversationContext,
-  type WorkspaceAction,
 } from "../../../workspace/contracts";
+import {
+  GROCERY_AISLES,
+  GroceryAisleSchema,
+  InventoryEnrichmentFieldSchema,
+  QUERY_INTENTS,
+  QueryIntentSchema,
+} from "../../../workspace/query-events";
 
-export const QUERY_INTENTS = [
-  "inventory",
-  "expiry",
-  "food_knowledge",
-  "recipe",
-  "shopping",
-  "space",
-  "clarification",
-] as const;
+// The stream-event schemas (QueryStreamEventSchema and its payloads) live in
+// the client-safe shared module and are re-exported here so existing server
+// imports keep working.
+export {
+  QueryIntentSchema,
+  InventoryEnrichmentFieldSchema,
+  RecipeCardSchema,
+  ExpiryPlanSchema,
+  GroceryPlanSchema,
+  PantryCompletionPlanSchema,
+  QueryVisualEvidenceSchema,
+  QueryStreamEventSchema,
+} from "../../../workspace/query-events";
+export type {
+  QueryIntent,
+  RecipeCard,
+  ExpiryPlan,
+  GroceryAisle,
+  GroceryPlanItem,
+  GroceryPlan,
+  PantryCompletionPlan,
+  QueryVisualEvidence,
+  QueryStreamEvent,
+} from "../../../workspace/query-events";
 
 export const QUERY_VISIBLE_RESPONSE_TAG = "query_visible_response";
 
-export const QueryIntentSchema = z.enum(QUERY_INTENTS);
+const ShoppingModeSchema = z.enum(["direct", "grocery_planner", "pantry_completion"]);
 
-export const InventoryEnrichmentFieldSchema = z.enum([
-  "identity",
-  "quantity",
-  "fill_level",
-  "expiration_date",
-  "opened",
-]);
-
-export const EnrichmentRequirementSchema = z.object({
+const EnrichmentRequirementSchema = z.object({
   itemNames: z.array(z.string().trim().min(1)).default([]),
   fields: z.array(InventoryEnrichmentFieldSchema).default([]),
 });
@@ -56,7 +67,9 @@ export type EnrichmentRequirement = z.infer<typeof EnrichmentRequirementSchema>;
 export const IntentResponseSchema = z.object({
   intent: QueryIntentSchema,
   recipeContinuation: z.boolean().optional().default(false),
+  shoppingMode: ShoppingModeSchema.optional().default("direct"),
   enrichment: EnrichmentRequirementSchema.optional().default({ itemNames: [], fields: [] }),
+  memoryUpdateRequested: z.boolean().optional().default(false),
 });
 
 export const IntentResponseProviderSchema = {
@@ -71,6 +84,11 @@ export const IntentResponseProviderSchema = {
       type: "boolean",
       description: "True only when the request should continue an existing recipe search session rather than start a new recipe search.",
     },
+    shoppingMode: {
+      type: "string",
+      enum: ["direct", "grocery_planner", "pantry_completion"],
+      description: "For shopping requests, use grocery_planner for a shopping trip, grocery list, or meal-shopping plan; pantry_completion for pantry staples or ingredients that unlock more recipes; direct for a specific restock or inventory question.",
+    },
     enrichment: {
       type: "object",
       properties: {
@@ -83,14 +101,67 @@ export const IntentResponseProviderSchema = {
       required: ["itemNames", "fields"],
       description: "Only inventory facts needed to answer the request. Leave both arrays empty when the coarse inventory is sufficient.",
     },
+    memoryUpdateRequested: {
+      type: "boolean",
+      description: "True only when the user explicitly states durable inventory outside the scanned storage, a dietary restriction or identity, a food preference, a personal goal, or a durable household fact that should be saved.",
+    },
   },
-  required: ["intent", "enrichment"],
+  required: ["intent", "enrichment", "memoryUpdateRequested"],
 } as const;
 
-export type QueryIntent = z.infer<typeof QueryIntentSchema>;
+const RecipeSearchFacetKindSchema = z.enum([
+  "meal",
+  "cuisine",
+  "flavor",
+  "method",
+  "dish",
+]);
+
+export const RecipeSearchFacetSchema = z.object({
+  kind: RecipeSearchFacetKindSchema,
+  text: z.string().trim().min(1),
+});
+
+export type RecipeSearchFacet = z.infer<typeof RecipeSearchFacetSchema>;
+
+export const RecipeSearchInterpretationSchema = z.object({
+  facets: z.array(RecipeSearchFacetSchema).max(8).default([]),
+  intent: z.object({
+    specific: z.boolean(),
+  }),
+  useAvailableIngredients: z.boolean().default(false),
+  excludedIngredients: z.array(z.string().trim().min(1)).default([]),
+  dietaryRestrictions: z.array(z.string().trim().min(1)).default([]),
+  maxMinutes: z.number().finite().positive().nullable().default(null),
+  maxCalories: z.number().finite().nonnegative().nullable().default(null),
+  minProteinDailyValue: z.number().finite().nonnegative().nullable().default(null),
+  preferredIngredients: z.array(z.string().trim().min(1)).default([]),
+  requiredTags: z.array(z.string().trim().min(1)).default([]),
+  preferredTags: z.array(z.string().trim().min(1)).default([]),
+  excludedTags: z.array(z.string().trim().min(1)).default([]),
+});
+
+export type RecipeSearchInterpretation = z.infer<typeof RecipeSearchInterpretationSchema>;
+
+export const RecipeSearchPlanSchema = z.object({
+  userFacets: z.array(RecipeSearchFacetSchema).default([]),
+  userTags: z.array(z.string().trim().min(1)).default([]),
+  memoryTags: z.array(z.string().trim().min(1)).default([]),
+  inventoryIngredients: z.array(z.string().trim().min(1)).default([]),
+});
+
+export type RecipeSearchPlan = z.infer<typeof RecipeSearchPlanSchema>;
 
 export const RecipeSearchRequestSchema = z.object({
   semanticQuery: z.string().trim().min(1),
+  semanticQueryWithoutInventory: z.string().trim().min(1),
+  vectorCandidateLimit: z.number().int().min(1).max(120).default(50),
+  correctiveAttempt: z.boolean().default(false),
+  plan: RecipeSearchPlanSchema,
+  intent: z.object({
+    specific: z.boolean(),
+    relatedSemanticQuery: z.string().trim().min(1).nullable(),
+  }).optional(),
   useAvailableIngredients: z.boolean().default(false),
   excludedIngredients: z.array(z.string().trim().min(1)).default([]),
   dietaryRestrictions: z.array(z.string().trim().min(1)).default([]),
@@ -109,20 +180,67 @@ export const RecipeSearchRequestSchema = z.object({
 
 export type RecipeSearchRequest = z.infer<typeof RecipeSearchRequestSchema>;
 
+export const RecipeRetrievalTerminalReasonSchema = z.enum([
+  "ready",
+  "search_unavailable",
+  "vector_empty",
+  "candidate_sources_empty",
+  "canonical_hydration_empty",
+  "hard_constraints_rejected",
+  "coverage_rejected",
+  "tournament_empty",
+  "tournament_complete",
+]);
+
+export const RecipeRetrievalAuditSchema = z.object({
+  vectorCandidates: z.number().int().nonnegative(),
+  tagSqlCandidates: z.number().int().nonnegative(),
+  ingredientSqlCandidates: z.number().int().nonnegative(),
+  deduplicatedCandidateIds: z.number().int().nonnegative(),
+  canonicalHydrationCount: z.number().int().nonnegative(),
+  hardFilterRejections: z.number().int().nonnegative(),
+  coverageRankedCandidates: z.number().int().nonnegative(),
+  tournamentCandidates: z.number().int().nonnegative(),
+  terminalReason: RecipeRetrievalTerminalReasonSchema,
+});
+
+export type RecipeRetrievalAudit = z.infer<typeof RecipeRetrievalAuditSchema>;
+
 export const RecipeSearchSessionSchema = z.object({
   profile: RecipeSearchRequestSchema,
   inventoryFingerprint: z.string(),
   shownRecipeIds: z.array(z.string()),
 });
 
-export type RecipeSearchSession = z.infer<typeof RecipeSearchSessionSchema>;
-
 export const RecipeSearchRequestProviderSchema = {
   type: "object",
   properties: {
-    semanticQuery: {
-      type: "string",
-      description: "Meal, flavor, cuisine, cooking style, or recipe intent to retrieve.",
+    facets: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: ["meal", "cuisine", "flavor", "method", "dish"],
+          },
+          text: {
+            type: "string",
+            description: "An exact phrase copied from the user's request. Do not paraphrase or add terms.",
+          },
+        },
+        required: ["kind", "text"],
+      },
+    },
+    intent: {
+      type: "object",
+      properties: {
+        specific: {
+          type: "boolean",
+          description: "True when the user named a dish, meal style, cuisine, flavor, or other recipe theme that should take priority over general inventory coverage.",
+        },
+      },
+      required: ["specific"],
     },
     useAvailableIngredients: {
       type: "boolean",
@@ -156,7 +274,7 @@ export const RecipeSearchRequestProviderSchema = {
     preferredIngredients: {
       type: "array",
       items: { type: "string" },
-      description: "Ingredients the user explicitly wants included. These are hard recipe-ingredient constraints unless useAvailableIngredients is true.",
+      description: "Ingredients the user explicitly mentions as retrieval and ranking signals. Multiple entries may be alternatives rather than an all-of requirement.",
     },
     requiredTags: {
       type: "array",
@@ -175,7 +293,8 @@ export const RecipeSearchRequestProviderSchema = {
     },
   },
   required: [
-    "semanticQuery",
+    "facets",
+    "intent",
     "useAvailableIngredients",
     "excludedIngredients",
     "dietaryRestrictions",
@@ -195,14 +314,10 @@ export type QueryGraphInput = {
   imageId: string | null;
   query: string;
   threadId?: string;
+  requestId?: string;
+  recipeContinuation?: boolean;
   conversationContext?: ConversationContext;
 };
-
-export const InventoryClarificationQuestionSchema = z.object({
-  itemId: z.string(),
-  field: InventoryEnrichmentFieldSchema,
-  question: z.string(),
-});
 
 export const InventoryClarificationResumeSchema = z.object({
   answers: z.record(z.string(), z.string().trim()).default({}),
@@ -211,59 +326,66 @@ export const InventoryClarificationResumeSchema = z.object({
 
 export type InventoryClarificationResume = z.infer<typeof InventoryClarificationResumeSchema>;
 
-export const InventorySplitReviewResumeSchema = z.object({
+const InventorySplitReviewResumeSchema = z.object({
+  approved: z.boolean(),
+});
+
+const InventoryMutationReviewResumeSchema = z.object({
   approved: z.boolean(),
 });
 
 export const QueryResumeSchema = InventoryClarificationResumeSchema.extend({
   splitReview: InventorySplitReviewResumeSchema.optional(),
+  inventoryMutationReview: InventoryMutationReviewResumeSchema.optional(),
 });
 
 export type QueryResume = z.infer<typeof QueryResumeSchema>;
 
-export type RecipeCard = {
-  id: string;
-  name: string;
-  description: string | null;
-  minutes: number;
-  matchedIngredients: string[];
-  missingIngredients: string[];
-  matchedTags: string[];
-  matchBadges: string[];
-  usesSoonIngredients?: string[];
-  tournamentPlacement?: "winner" | "finalist";
-};
+export const GroceryRecipeSelectionSchema = z.object({
+  recipeIds: z.array(z.string()).min(3).max(6),
+});
 
-export type ExpiryPlanItem = {
-  id: string;
-  visibleItemId: string | null;
-  name: string;
-  ingredientName: string;
-  storageLocation: string;
-  urgency: "fresh" | "use_soon" | "urgent" | "expired" | "unknown";
-  source: "user_date" | "observed_date" | "recorded_date" | "estimated";
-  confidence: "high" | "medium" | "low";
-  date: string;
-  label: string;
-  dateIssue: string | null;
-  wasteScore: number;
-};
+export const GroceryRecipeSelectionProviderSchema = {
+  type: "object",
+  properties: {
+    recipeIds: {
+      type: "array",
+      minItems: 3,
+      maxItems: 6,
+      items: { type: "string" },
+    },
+  },
+  required: ["recipeIds"],
+} as const;
 
-export type ExpiryPlan = {
-  items: ExpiryPlanItem[];
-  priorityItems: ExpiryPlanItem[];
-  expiredItems: ExpiryPlanItem[];
-};
+export const GroceryAisleAssignmentSchema = z.object({
+  assignments: z.array(z.object({
+    ingredient: z.string().min(1),
+    aisle: GroceryAisleSchema,
+  })),
+});
+
+export const GroceryAisleAssignmentProviderSchema = {
+  type: "object",
+  properties: {
+    assignments: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          ingredient: { type: "string" },
+          aisle: { type: "string", enum: GROCERY_AISLES },
+        },
+        required: ["ingredient", "aisle"],
+      },
+    },
+  },
+  required: ["assignments"],
+} as const;
 
 export type RecipeRetrievalGrade = {
   relevant: boolean;
   reason: string;
-};
-
-export type QueryVisualEvidence = {
-  itemId: string;
-  displayName: string;
-  dataUrl: string;
 };
 
 export const WorkspaceActionPlanSchema = z.object({
@@ -281,80 +403,11 @@ export const WorkspaceActionPlanProviderSchema = {
   required: ["actions"],
 } as const;
 
-export type QueryStreamEvent =
-  | {
-    type: "status";
-    message: string;
-    node?: string;
-  }
-  | {
-    type: "tool";
-    name: string;
-    status: "started" | "progress" | "finished";
-    message: string;
-  }
-  | {
-    type: "token";
-    text: string;
-  }
-  | {
-    type: "recipe_tournament_started";
-    candidateCount: number;
-    displaySlotCount: number;
-  }
-  | {
-    type: "recipe_tournament_update";
-    recipes: RecipeCard[];
-    evaluatedCount: number;
-    totalCount: number;
-    droppedRecipeIds: string[];
-  }
-  | {
-    type: "recipe_tournament_finished";
-    recipes: RecipeCard[];
-  }
-  | {
-    type: "expiry_plan";
-    plan: ExpiryPlan;
-  }
-  | {
-    type: "clarification";
-    questions: z.infer<typeof InventoryClarificationQuestionSchema>[];
-  }
-  | {
-    type: "inventory_split_review";
-    zoneId: string;
-    summary: string;
-    items: Array<{ label: string; name: string }>;
-  }
-  | {
-    type: "final";
-    answer: string;
-    intent: QueryIntent | null;
-    recipes: RecipeCard[];
-    expiryPlan?: ExpiryPlan;
-    visualEvidence: QueryVisualEvidence[];
-    workspaceActions?: WorkspaceAction[];
-    agentEvents?: AgentActivityEvent[];
-  }
-  | {
-    type: "workspace_action";
-    action: WorkspaceAction;
-  }
-  | {
-    type: "agent_event";
-    event: AgentActivityEvent;
-  }
-  | {
-    type: "error";
-    error: string;
-  };
-
 export type QueryGraphDependencies = {
   promptBundle?: Pick<
     PromptBundle,
     "queryMemoryExtraction" | "queryRecipeSearch" | "queryResponse"
-  > & Partial<Pick<PromptBundle, "workspaceActionPlan" | "recipeRetrievalGrade" | "recipeQueryRewrite" | "recipeTournamentEvaluation">>;
+  > & Partial<Pick<PromptBundle, "workspaceActionPlan" | "recipeRetrievalGrade" | "recipeTournamentEvaluation" | "groceryRecipeSelection" | "groceryAisleAssignment" | "intentRouting" | "seededInventoryAssertions" | "focusedInventoryEnrichment" | "inventoryClarificationUser" | "inventoryClarificationInference" | "scopedInventorySplit" | "organizationPlan">>;
   loadInventoryForImage?: (imageId: string) => Inventory | null;
   householdInventoryTool?: {
     invoke(input: {
@@ -407,19 +460,24 @@ export type QueryGraphDependencies = {
     semanticMemory: SemanticMemory | null;
   }>>;
   indexSemanticMemory?: (memory: SemanticMemory) => Promise<void>;
-  intentModel?: ChatGoogleGenerativeAI;
-  seededInventoryAssertionModel?: ChatGoogleGenerativeAI;
+  intentModel?: FridgeFriendChatModel;
+  seededInventoryAssertionModel?: FridgeFriendChatModel;
   applySeededInventoryAssertions?: (input: {
     seededItems: ConversationContext["seededItems"];
     assertions: SeededInventoryAssertion[];
   }) => AppliedSeededInventoryAssertion[] | Promise<AppliedSeededInventoryAssertion[]>;
-  recipeSearchModel?: ChatGoogleGenerativeAI;
-  recipeRetrievalGradeModel?: ChatGoogleGenerativeAI;
-  recipeQueryRewriteModel?: ChatGoogleGenerativeAI;
-  recipeTournamentModel?: ChatGoogleGenerativeAI;
+  recipeSearchModel?: FridgeFriendChatModel;
+  recipeRetrievalGradeModel?: FridgeFriendChatModel;
+  recipeTournamentModel?: FridgeFriendChatModel;
+  groceryRecipeSelectionModel?: FridgeFriendChatModel;
+  groceryAisleAssignmentModel?: FridgeFriendChatModel;
+  organizationPlannerModel?: FridgeFriendChatModel;
   searchRecipeCandidates?: (input: {
     query: string;
     limit: number;
+    maxMinutes?: number | null;
+    maxCalories?: number | null;
+    minProteinDailyValue?: number | null;
   }) => Promise<RecipeCandidate[]>;
   getRecipesByIds?: (recipeIds: string[]) => Recipe[] | Promise<Recipe[]>;
   listFoodComTags?: () => string[] | Promise<string[]>;
@@ -449,11 +507,28 @@ export type QueryGraphDependencies = {
     matchedIngredients: string[];
     ingredientScore: number;
   }>>;
-  memoryExtractionModel?: ChatGoogleGenerativeAI;
-  responseModel?: ChatGoogleGenerativeAI;
-  enrichmentModel?: ChatGoogleGenerativeAI;
-  drawerSplitModel?: ChatGoogleGenerativeAI;
-  workspaceActionModel?: ChatGoogleGenerativeAI;
+  getPantryCompletionRecipeCandidates?: (input: {
+    ingredients: string[];
+    universalIngredients: readonly string[];
+    minMissingIngredients: number;
+    maxMissingIngredients: number;
+    limit: number;
+  }) => Array<{
+    recipeId: string;
+    matchedIngredients: string[];
+    ingredientScore: number;
+    missingIngredientCount: number;
+  }> | Promise<Array<{
+    recipeId: string;
+    matchedIngredients: string[];
+    ingredientScore: number;
+    missingIngredientCount: number;
+  }>>;
+  memoryExtractionModel?: FridgeFriendChatModel;
+  responseModel?: FridgeFriendChatModel;
+  enrichmentModel?: FridgeFriendChatModel;
+  inventorySplitModel?: FridgeFriendChatModel;
+  workspaceActionModel?: FridgeFriendChatModel;
   loadImageDataUrlForQuery?: (
     imageId: string,
   ) => string | null | Promise<string | null>;

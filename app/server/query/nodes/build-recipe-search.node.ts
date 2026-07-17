@@ -1,22 +1,29 @@
 import { listFoodComTags } from "../../recipes/repository.server";
 import { normalizeIngredientName } from "../../recipes/normalization";
-import { VISION_MODEL } from "../../scan/schemas/inventory";
 import { promptMessages } from "../../scan/services/prompt-messages.server";
 import {
+  RecipeSearchInterpretationSchema,
   RecipeSearchRequestProviderSchema,
-  RecipeSearchRequestSchema,
+  type RecipeSearchRequest,
   type QueryGraphDependencies,
 } from "../schemas/query";
 import {
   foodComGoalTags,
   resolveFoodComTags,
 } from "../services/recipe-tag-resolution.server";
-import { createQueryModel } from "../services/query-model.server";
+import {
+  buildRecipeSearchPlan,
+  compileRecipeSearch,
+  validateRecipeSearchInterpretation,
+} from "../services/recipe-search-plan.server";
+import { createQueryModel, CHAT_PROVIDER, GENERAL_MODEL } from "../services/query-model.server";
 import type { FridgeQueryStateValue } from "../state";
 import { availableRecipeIngredients } from "../services/available-recipe-ingredients.server";
+import type { AvailableRecipeIngredient } from "../services/recipe-retrieval.server";
 
 function isGenericFridgeRecipeRequest(query: string) {
-  return /\b(recipe|recipes|meal|meals|cook|make)\b.*\b(fridge|items?|ingredients?)\b/iu.test(query);
+  return /\b(recipe|recipes|meal|meals|cook|make)\b/iu.test(query) &&
+    /\b(fridge|items?|ingredients?)\b/iu.test(query);
 }
 
 function isRecipeContinuation(state: FridgeQueryStateValue) {
@@ -28,6 +35,10 @@ function isRecipeContinuation(state: FridgeQueryStateValue) {
     "recipeContinuation" in routing &&
     routing.recipeContinuation === true
   );
+}
+
+function hasExplicitRequirement(query: string) {
+  return /\b(must|only|strictly|required|require)\b/iu.test(query);
 }
 
 export function recipeInventoryFingerprint(ingredients: string[]) {
@@ -65,9 +76,63 @@ function conflictMessage(input: {
     : null;
 }
 
+function buildSearch(input: {
+  availableIngredients: AvailableRecipeIngredient[];
+  facets: RecipeSearchRequest["plan"]["userFacets"];
+  userTags: string[];
+  memory: ReturnType<typeof memoryTagProfile>;
+  specific: boolean;
+  useAvailableIngredients: boolean;
+  excludedIngredients: string[];
+  dietaryRestrictions: string[];
+  maxMinutes: number | null;
+  maxCalories: number | null;
+  minProteinDailyValue: number | null;
+  preferredIngredients: string[];
+  requiredTags: string[];
+  preferredTags: string[];
+  excludedTags: string[];
+}): RecipeSearchRequest {
+  const plan = buildRecipeSearchPlan({
+    facets: input.facets,
+    userTags: input.userTags,
+    memoryTags: [...input.memory.preferred, ...input.memory.goals],
+    availableIngredients: input.availableIngredients,
+  });
+  const compiled = compileRecipeSearch({ plan, specific: input.specific });
+
+  return {
+    ...compiled,
+    plan,
+    useAvailableIngredients: input.useAvailableIngredients,
+    excludedIngredients: input.excludedIngredients,
+    dietaryRestrictions: input.dietaryRestrictions,
+    maxMinutes: input.maxMinutes,
+    maxCalories: input.maxCalories,
+    minProteinDailyValue: input.minProteinDailyValue,
+    preferredIngredients: input.preferredIngredients,
+    requiredTags: input.requiredTags,
+    preferredTags: input.preferredTags,
+    excludedTags: input.excludedTags,
+    memoryPreferredTags: input.memory.preferred,
+    memoryExcludedTags: input.memory.excluded,
+    memoryGoalTags: input.memory.goals,
+    continuation: false,
+  };
+}
+
+function searchStateError(message: string) {
+  return {
+    recipeSearch: null,
+    recipeSearchError: message,
+    recipeClarification: "I couldn't safely interpret that recipe request. Please restate the dish or constraint you want me to use.",
+  };
+}
+
 export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
   return async function buildRecipeSearchNode(state: FridgeQueryStateValue) {
-    const ingredients = (await availableRecipeIngredients(state, deps)).map((ingredient) => ingredient.name);
+    const availableIngredients = await availableRecipeIngredients(state, deps);
+    const ingredients = availableIngredients.map((ingredient) => ingredient.name);
 
     if (isRecipeContinuation(state) && state.recipeSearchSession) {
       if (state.recipeSearchSession.inventoryFingerprint !== recipeInventoryFingerprint(ingredients)) {
@@ -89,8 +154,10 @@ export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
     const catalog = await (deps.listFoodComTags ?? listFoodComTags)();
     const memory = memoryTagProfile(state, catalog);
     const promptTags = resolveFoodComTags([state.query], catalog);
+    const inventoryFirstSearch = state.intent === "expiry" ||
+      state.intent === "recipe" && isGenericFridgeRecipeRequest(state.query);
 
-    if ((state.intent === "expiry" || isGenericFridgeRecipeRequest(state.query)) && ingredients.length > 0) {
+    if (inventoryFirstSearch && availableIngredients.length > 0) {
       const clarification = conflictMessage({
         promptTags,
         promptExcludedTags: [],
@@ -102,25 +169,23 @@ export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
       }
 
       return {
-        recipeSearch: {
-          semanticQuery: state.intent === "expiry"
-            ? `${state.query}\nAvailable ingredients: ${ingredients.join(", ")}\nPrioritize recipes that use the most urgent available ingredients.`
-            : `${state.query}\nAvailable ingredients: ${ingredients.join(", ")}`,
+        recipeSearch: buildSearch({
+          availableIngredients,
+          facets: [],
+          userTags: promptTags,
+          memory,
+          specific: false,
           useAvailableIngredients: true,
           excludedIngredients: [],
           dietaryRestrictions: [],
           maxMinutes: null,
           maxCalories: null,
           minProteinDailyValue: null,
-          preferredIngredients: ingredients,
+          preferredIngredients: [],
           requiredTags: [],
           preferredTags: promptTags,
           excludedTags: [],
-          memoryPreferredTags: memory.preferred,
-          memoryExcludedTags: memory.excluded,
-          memoryGoalTags: memory.goals,
-          continuation: false,
-        },
+        }),
         recipeSearchSession: null,
         shownRecipeIds: [],
         recipeSearchError: null,
@@ -130,7 +195,7 @@ export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
 
     const model = deps.recipeSearchModel ?? createQueryModel();
     const structuredModel = model.withStructuredOutput(RecipeSearchRequestProviderSchema, {
-      name: "FridgeRecipeSearchRequest",
+      name: "FridgeRecipeSearchInterpretation",
     });
     const loadedPrompt = deps.promptBundle?.queryRecipeSearch;
 
@@ -148,25 +213,38 @@ export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
           imageId: state.imageId,
           langsmithPromptName: loadedPrompt.name,
           langsmithPromptRef: loadedPrompt.ref,
-          model: VISION_MODEL,
+          provider: CHAT_PROVIDER,
+          model: GENERAL_MODEL,
         },
       },
     );
-    const parsed = RecipeSearchRequestSchema.safeParse(result);
+    const parsed = RecipeSearchInterpretationSchema.safeParse(result);
 
     if (!parsed.success) {
-      return {
-        recipeSearch: null,
-        recipeSearchError: `Recipe search extraction returned invalid output: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
-        recipeClarification: null,
-      };
+      return searchStateError(
+        `Recipe search interpretation returned invalid output: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+      );
     }
 
-    const directTags = [...new Set([
-      ...promptTags,
-      ...resolveFoodComTags([...parsed.data.requiredTags, ...parsed.data.preferredTags], catalog),
-    ])].sort();
+    const interpretationError = validateRecipeSearchInterpretation({
+      query: state.query,
+      interpretation: parsed.data,
+    });
+    if (interpretationError) {
+      return searchStateError(interpretationError);
+    }
+
+    const interpretedTags = resolveFoodComTags([
+      ...parsed.data.requiredTags,
+      ...parsed.data.preferredTags,
+    ], catalog);
+    const dietaryTags = resolveFoodComTags(parsed.data.dietaryRestrictions, catalog);
     const excludedTags = resolveFoodComTags(parsed.data.excludedTags, catalog);
+    const directTags = [...new Set([...promptTags, ...interpretedTags])].sort();
+    const requiredTags = [...new Set([
+      ...dietaryTags,
+      ...(hasExplicitRequirement(state.query) ? directTags : []),
+    ])].filter((tag) => !excludedTags.includes(tag)).sort();
     const clarification = conflictMessage({
       promptTags: directTags,
       promptExcludedTags: excludedTags,
@@ -178,18 +256,23 @@ export function createBuildRecipeSearchNode(deps: QueryGraphDependencies) {
     }
 
     return {
-      recipeSearch: {
-        ...parsed.data,
-        useAvailableIngredients: parsed.data.useAvailableIngredients ||
-          ingredients.length > 0 && isGenericFridgeRecipeRequest(state.query),
-        requiredTags: resolveFoodComTags(parsed.data.requiredTags, catalog),
+      recipeSearch: buildSearch({
+        availableIngredients,
+        facets: parsed.data.facets,
+        userTags: directTags,
+        memory,
+        specific: parsed.data.intent.specific,
+        useAvailableIngredients: parsed.data.useAvailableIngredients,
+        excludedIngredients: parsed.data.excludedIngredients.map(normalizeIngredientName).filter(Boolean),
+        dietaryRestrictions: parsed.data.dietaryRestrictions,
+        maxMinutes: parsed.data.maxMinutes,
+        maxCalories: parsed.data.maxCalories,
+        minProteinDailyValue: parsed.data.minProteinDailyValue,
+        preferredIngredients: parsed.data.preferredIngredients.map(normalizeIngredientName).filter(Boolean),
+        requiredTags,
         preferredTags: directTags,
         excludedTags,
-        memoryPreferredTags: memory.preferred,
-        memoryExcludedTags: memory.excluded,
-        memoryGoalTags: memory.goals,
-        continuation: false,
-      },
+      }),
       recipeSearchSession: null,
       shownRecipeIds: [],
       recipeSearchError: null,

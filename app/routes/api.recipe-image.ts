@@ -1,13 +1,10 @@
 import type { LoaderFunctionArgs } from "react-router";
 
+import { jsonError } from "../server/http.server";
 import {
   foodComRecipeUrl,
   getFoodComOpenGraphImage,
 } from "../server/recipes/food-com-embed.server";
-
-function jsonError(error: string, status: number) {
-  return Response.json({ error }, { status });
-}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);

@@ -3,6 +3,11 @@ import type { QueryIntent } from "../schemas/query";
 import type { FridgeQueryStateValue } from "../state";
 import { Send } from "@langchain/langgraph";
 import { routeInventoryEnrichment } from "../nodes/enrich-inventory.node";
+import {
+  isGroceryPlannerRequest,
+  isPantryCompletionRequest,
+  isShoppingPlanningRequest,
+} from "../services/grocery-planner.server";
 
 export function routeRecipeSearch(state: FridgeQueryStateValue) {
   return state.recipeClarification ? "clarification" : "retrieve_recipes";
@@ -15,7 +20,7 @@ export function routeIntent(state: FridgeQueryStateValue): QueryIntent {
 export function routeIntentOrMemory(
   state: FridgeQueryStateValue,
 ): QueryIntent | "memory_update" {
-  if (shouldExtractMemoryCandidates(state.query)) {
+  if (shouldExtractMemoryCandidates(state)) {
     return "memory_update";
   }
 
@@ -24,40 +29,43 @@ export function routeIntentOrMemory(
 
 export function routeInventoryFollowup(
   state: FridgeQueryStateValue,
-): "respond" | "retrieve_recipes" | "calculate_space" | "plan_expiry" {
+): "respond" | "build_recipe_search" | "plan_expiry" | "plan_organization" | "plan_placement_correction" {
   if (state.intent === "expiry") {
     return "plan_expiry";
   }
   if (state.intent === "recipe") {
-    return "retrieve_recipes";
+    return "build_recipe_search";
   }
 
   if (state.intent === "shopping") {
-    const query = state.query.toLowerCase();
-
-    if (/\b(space|fit|room|capacity|shelf|drawer|organize|where|store)\b/.test(query)) {
-      return "calculate_space";
+    if (isShoppingPlanningRequest(state)) {
+      return "build_recipe_search";
     }
 
-    if (/\b(recipe|meal|cook|ingredient|unlock|maximi[sz]e|add|buy|grocery|groceries|shop|shopping|restock)\b/.test(query)) {
-      return "retrieve_recipes";
-    }
-
-    return "calculate_space";
+    return "respond";
   }
 
+  if (state.intent === "organization") return "plan_organization";
+  if (state.intent === "placement_correction") return "plan_placement_correction";
+
   return "respond";
+}
+
+export function routeInventorySplitProposal(state: FridgeQueryStateValue) {
+  return state.intent === "inventory"
+    ? "propose_scoped_inventory_split"
+    : "assess_inventory_enrichment";
 }
 
 export function routeExpiryPlan(state: FridgeQueryStateValue) {
   const expiryPlan = state.context.expiryPlan;
   if (typeof expiryPlan !== "object" || expiryPlan === null || !("priorityItems" in expiryPlan)) {
-    return "plan_workspace_actions";
+    return "respond";
   }
 
   return Array.isArray(expiryPlan.priorityItems) && expiryPlan.priorityItems.length > 0
     ? "build_recipe_search"
-    : "plan_workspace_actions";
+    : "respond";
 }
 
 export function routeAfterInventoryEnrichment(state: FridgeQueryStateValue) {
@@ -68,7 +76,13 @@ export function routeAfterInventoryEnrichment(state: FridgeQueryStateValue) {
 
 export function routeRecipeRetrievalGrade(state: FridgeQueryStateValue) {
   if (state.tournamentCandidates.length === 0) {
-    return "plan_workspace_actions";
+    if (state.recipeRewriteCount < 1) return "rewrite_recipe_query";
+    if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
+    return isGroceryPlannerRequest(state) ? "plan_groceries" : "respond";
+  }
+
+  if (isPantryCompletionRequest(state) && state.recipeRetrievalGrade?.relevant) {
+    return "plan_pantry_completion";
   }
 
   if (state.recipeRetrievalGrade?.relevant) {
@@ -86,9 +100,17 @@ export function routeRecipeRetrievalGrade(state: FridgeQueryStateValue) {
     return "rewrite_recipe_query";
   }
 
-  return "plan_workspace_actions";
+  if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
+  return isGroceryPlannerRequest(state) ? "plan_groceries" : "respond";
 }
 
 export function routeRecipeQueryRewrite(state: FridgeQueryStateValue) {
-  return state.recipeSearchError ? "plan_workspace_actions" : "retrieve_recipes";
+  if (!state.recipeSearchError) return "retrieve_recipes";
+  if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
+  return isGroceryPlannerRequest(state) ? "plan_groceries" : "respond";
+}
+
+export function routeRecipeTournamentResult(state: FridgeQueryStateValue) {
+  if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
+  return isGroceryPlannerRequest(state) ? "plan_groceries" : "respond";
 }

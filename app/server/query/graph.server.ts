@@ -1,7 +1,7 @@
 import { Command, END, START, Overwrite, StateGraph, type RetryPolicy } from "@langchain/langgraph";
 
 import { checkpointer } from "../checkpointer.server";
-import { assertLangSmithTracingEnabled } from "../langsmith.server";
+import { getLangSmithConfig } from "../langsmith.server";
 import { loadPromptBundle } from "../prompts/registry.server";
 import { createCalculateSpaceNode } from "./nodes/calculate-space.node";
 import { createDetermineIntentNode } from "./nodes/determine-intent.node";
@@ -9,35 +9,48 @@ import { createApplySeededInventoryAssertionsNode } from "./nodes/apply-seeded-i
 import { createBuildRecipeSearchNode } from "./nodes/build-recipe-search.node";
 import { createExtractMemoryCandidatesNode } from "./nodes/extract-memory-candidates.node";
 import { createLoadFridgeContextNode } from "./nodes/load-fridge-context.node";
-import { createPersistMemoryNode } from "./nodes/persist-memory.node";
+import {
+  createApplyMemoryWritesNode,
+  createIndexSemanticMemoryNode,
+  createReloadMemoryContextNode,
+} from "./nodes/persist-memory.node";
 import { createPlanWorkspaceActionsNode } from "./nodes/plan-workspace-actions.node";
 import { createPlanExpiryNode } from "./nodes/plan-expiry.node";
 import { createQueryInventoryNode } from "./nodes/query-inventory.node";
-import { createProposeDrawerSplitNode, reviewDrawerSplitNode, routeDrawerSplitReview } from "./nodes/propose-drawer-split.node";
+import { createProposeScopedInventorySplitNode, reviewScopedInventorySplitNode, routeScopedInventorySplitReview } from "./nodes/propose-drawer-split.node";
 import {
   createAssessInventoryEnrichmentNode,
+  createPersistInventoryEnrichmentNode,
   createRequestInventoryClarificationNode,
   createRunFocusedInventoryEnrichmentNode,
 } from "./nodes/enrich-inventory.node";
 import { requestClarificationNode } from "./nodes/request-clarification.node";
 import { createRespondNode } from "./nodes/respond.node";
-import { retrieveKnowledgeNode } from "./nodes/retrieve-knowledge.node";
-import { createRetrieveRecipesNode } from "./nodes/retrieve-recipes.node";
+import { createRankRetrievedRecipesNode, createRetrieveRecipeCandidatesNode } from "./nodes/retrieve-recipes.node";
 import { createGradeRecipeRetrievalNode } from "./nodes/grade-recipe-retrieval.node";
 import { createRewriteRecipeQueryNode } from "./nodes/rewrite-recipe-query.node";
 import { createEvaluateRecipeNode } from "./nodes/evaluate-recipe.node";
 import { createResolveRecipeTournamentNode } from "./nodes/resolve-recipe-tournament.node";
+import { createPlanGroceriesNode } from "./nodes/plan-groceries.node";
+import { createPlanPantryCompletionNode } from "./nodes/plan-pantry-completion.node";
+import { createPlanOrganizationNode } from "./nodes/plan-organization.node";
+import { createPlanPlacementCorrectionNode } from "./nodes/plan-placement-correction.node";
 import { validateMemoryCandidatesNode } from "./nodes/validate-memory-candidates.node";
 import {
   routeIntent,
   routeIntentOrMemory,
-  routeInventoryFollowup,
   routeAfterInventoryEnrichment,
   routeRecipeRetrievalGrade,
   routeRecipeQueryRewrite,
   routeRecipeSearch,
   routeExpiryPlan,
+  routeInventorySplitProposal,
+  routeRecipeTournamentResult,
 } from "./routing/query-routing";
+import type {
+  DietaryPreferenceMemory,
+  DietaryRestrictionMemory,
+} from "../memory/schemas";
 import type {
   QueryGraphDependencies,
   QueryGraphInput,
@@ -47,12 +60,29 @@ import type {
   RecipeCard,
   QueryVisualEvidence,
   QueryStreamEvent,
+  GroceryPlan,
+  PantryCompletionPlan,
 } from "./schemas/query";
-import { QUERY_VISIBLE_RESPONSE_TAG } from "./schemas/query";
-import { FridgeQueryState } from "./state";
+import {
+  ExpiryPlanSchema,
+  QueryIntentSchema,
+  QueryStreamEventSchema,
+  QueryVisualEvidenceSchema,
+  RecipeRetrievalAuditSchema,
+  RecipeCardSchema,
+  QUERY_VISIBLE_RESPONSE_TAG,
+} from "./schemas/query";
+import { OrganizationPlanSchema, type OrganizationPlan } from "../organization/schemas";
+import {
+  groceryPlanErrorFromContext,
+  groceryPlanFromContext,
+  pantryCompletionClarificationFromContext,
+  pantryCompletionErrorFromContext,
+  pantryCompletionPlanFromContext,
+} from "./services/grocery-planner.server";
+import { FridgeQueryState, type FridgeQueryStateValue } from "./state";
 import { DEFAULT_USER_ID } from "../sqlite.server";
 import {
-  AgentActivityEventSchema,
   WorkspaceActionSchema,
   type WorkspaceAction,
 } from "../../workspace/contracts";
@@ -63,6 +93,10 @@ import {
   type RecipeTournamentEvaluation,
 } from "./services/recipe-tournament.server";
 import { z } from "zod";
+
+// Caps how many parallel tasks (for example fanned-out evaluate_recipe Sends)
+// run at once so a twenty-candidate tournament cannot burst twenty model calls.
+const QUERY_GRAPH_MAX_CONCURRENCY = 5;
 
 const queryGraphModelRetryPolicy: RetryPolicy = {
   maxAttempts: 4,
@@ -83,15 +117,17 @@ function normalizeQueryInput(input: QueryGraphInput) {
     ...input,
     userId: input.userId?.trim() || DEFAULT_USER_ID,
     threadId,
+    requestId: input.requestId?.trim() ?? "",
     answer: null,
     visualEvidence: [],
-    recipeRetrievalAttempt: 0,
     recipeRewriteCount: 0,
     recipeRetrievalGrade: null,
+    recipeRetrievalAudit: null,
     tournamentCandidates: [],
     tournamentCandidate: null,
     tournamentEvaluations: new Overwrite([]),
     context: {
+      recipeContinuationRequested: input.recipeContinuation === true,
       conversationContext: input.conversationContext ?? {
         selectedItemIds: [],
         selectedZoneIds: [],
@@ -116,7 +152,13 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       },
     )
     .addNode("validate_memory_candidates", validateMemoryCandidatesNode)
-    .addNode("persist_memory", createPersistMemoryNode(deps))
+    .addNode("apply_memory_writes", createApplyMemoryWritesNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("index_semantic_memory", createIndexSemanticMemoryNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("reload_memory_context", createReloadMemoryContextNode(deps))
     .addNode("determine_intent", createDetermineIntentNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
@@ -124,18 +166,21 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       retryPolicy: queryGraphModelRetryPolicy,
     })
     .addNode("query_inventory", createQueryInventoryNode(deps))
-    .addNode("propose_drawer_split", createProposeDrawerSplitNode(deps), {
+    .addNode("propose_scoped_inventory_split", createProposeScopedInventorySplitNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
-    .addNode("review_drawer_split", reviewDrawerSplitNode)
+    .addNode("review_inventory_split", reviewScopedInventorySplitNode)
     .addNode("plan_expiry", createPlanExpiryNode(deps))
     .addNode("assess_inventory_enrichment", createAssessInventoryEnrichmentNode(deps))
     .addNode("run_focused_inventory_enrichment", createRunFocusedInventoryEnrichmentNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
     .addNode("request_inventory_clarification", createRequestInventoryClarificationNode(deps))
-    .addNode("retrieve_knowledge", retrieveKnowledgeNode)
-    .addNode("retrieve_recipes", createRetrieveRecipesNode(deps))
+    .addNode("persist_inventory_enrichment", createPersistInventoryEnrichmentNode())
+    .addNode("retrieve_recipes", createRetrieveRecipeCandidatesNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("rank_retrieved_recipes", createRankRetrievedRecipesNode(deps))
     .addNode("grade_recipe_retrieval", createGradeRecipeRetrievalNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
@@ -146,6 +191,16 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       retryPolicy: queryGraphModelRetryPolicy,
     })
     .addNode("resolve_recipe_tournament", createResolveRecipeTournamentNode(deps))
+    .addNode("plan_groceries", createPlanGroceriesNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("plan_pantry_completion", createPlanPantryCompletionNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("plan_organization", createPlanOrganizationNode(deps), {
+      retryPolicy: queryGraphModelRetryPolicy,
+    })
+    .addNode("plan_placement_correction", createPlanPlacementCorrectionNode(deps))
     .addNode("calculate_space", createCalculateSpaceNode(deps))
     .addNode("request_clarification", requestClarificationNode)
     .addNode("plan_workspace_actions", createPlanWorkspaceActionsNode(deps), {
@@ -160,120 +215,174 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     .addConditionalEdges("determine_intent", routeIntentOrMemory, {
       inventory: "query_inventory",
       expiry: "query_inventory",
-      food_knowledge: "retrieve_knowledge",
+      food_knowledge: "respond",
       recipe: "query_inventory",
       shopping: "query_inventory",
       space: "calculate_space",
+      organization: "query_inventory",
+      placement_correction: "query_inventory",
+      general_chat: "extract_memory_candidates",
       clarification: "request_clarification",
       memory_update: "extract_memory_candidates",
     })
     .addEdge("extract_memory_candidates", "validate_memory_candidates")
-    .addEdge("validate_memory_candidates", "persist_memory")
-    .addConditionalEdges("persist_memory", routeIntent, {
+    .addEdge("validate_memory_candidates", "apply_memory_writes")
+    .addEdge("apply_memory_writes", "index_semantic_memory")
+    .addEdge("index_semantic_memory", "reload_memory_context")
+    .addConditionalEdges("reload_memory_context", routeIntent, {
       inventory: "query_inventory",
       expiry: "query_inventory",
-      food_knowledge: "retrieve_knowledge",
+      food_knowledge: "respond",
       recipe: "query_inventory",
       shopping: "query_inventory",
       space: "calculate_space",
+      organization: "query_inventory",
+      placement_correction: "query_inventory",
+      general_chat: "respond",
       clarification: "request_clarification",
     })
-    .addEdge("query_inventory", "propose_drawer_split")
-    .addEdge("propose_drawer_split", "assess_inventory_enrichment")
+    .addConditionalEdges("query_inventory", routeInventorySplitProposal, {
+      propose_scoped_inventory_split: "propose_scoped_inventory_split",
+      assess_inventory_enrichment: "assess_inventory_enrichment",
+    })
+    .addEdge("propose_scoped_inventory_split", "assess_inventory_enrichment")
     .addConditionalEdges("assess_inventory_enrichment", routeAfterInventoryEnrichment, {
       focused_vlm: "run_focused_inventory_enrichment",
       ask_user: "request_inventory_clarification",
-      respond: "plan_workspace_actions",
-      retrieve_recipes: "build_recipe_search",
-      calculate_space: "calculate_space",
+      respond: "respond",
+      build_recipe_search: "build_recipe_search",
       plan_expiry: "plan_expiry",
+      plan_organization: "plan_organization",
+      plan_placement_correction: "plan_placement_correction",
     })
-    .addEdge("run_focused_inventory_enrichment", "assess_inventory_enrichment")
-    .addEdge("request_inventory_clarification", "assess_inventory_enrichment")
+    .addEdge("run_focused_inventory_enrichment", "persist_inventory_enrichment")
+    .addEdge("request_inventory_clarification", "persist_inventory_enrichment")
+    .addEdge("persist_inventory_enrichment", "assess_inventory_enrichment")
     .addConditionalEdges("plan_expiry", routeExpiryPlan, {
       build_recipe_search: "build_recipe_search",
-      plan_workspace_actions: "plan_workspace_actions",
+      respond: "respond",
     })
     .addConditionalEdges("build_recipe_search", routeRecipeSearch, {
       retrieve_recipes: "retrieve_recipes",
       clarification: "request_clarification",
     })
-    .addEdge("retrieve_knowledge", "plan_workspace_actions")
-    .addEdge("retrieve_recipes", "grade_recipe_retrieval")
+    .addEdge("retrieve_recipes", "rank_retrieved_recipes")
+    .addEdge("rank_retrieved_recipes", "grade_recipe_retrieval")
     .addConditionalEdges("grade_recipe_retrieval", routeRecipeRetrievalGrade, {
       rewrite_recipe_query: "rewrite_recipe_query",
-      plan_workspace_actions: "plan_workspace_actions",
+      respond: "respond",
+      plan_groceries: "plan_groceries",
+      plan_pantry_completion: "plan_pantry_completion",
       evaluate_recipe: "evaluate_recipe",
     })
     .addConditionalEdges("rewrite_recipe_query", routeRecipeQueryRewrite, {
       retrieve_recipes: "retrieve_recipes",
-      plan_workspace_actions: "plan_workspace_actions",
+      respond: "respond",
+      plan_groceries: "plan_groceries",
+      plan_pantry_completion: "plan_pantry_completion",
     })
     .addEdge("evaluate_recipe", "resolve_recipe_tournament")
-    .addEdge("resolve_recipe_tournament", "plan_workspace_actions")
-    .addEdge("calculate_space", "plan_workspace_actions")
+    .addConditionalEdges("resolve_recipe_tournament", routeRecipeTournamentResult, {
+      respond: "respond",
+      plan_groceries: "plan_groceries",
+      plan_pantry_completion: "plan_pantry_completion",
+    })
+    .addEdge("plan_groceries", "respond")
+    .addEdge("plan_pantry_completion", "respond")
+    .addEdge("plan_organization", "respond")
+    .addEdge("plan_placement_correction", "respond")
+    .addEdge("calculate_space", "respond")
     .addEdge("request_clarification", END)
-    .addEdge("plan_workspace_actions", "respond")
-    .addConditionalEdges("respond", routeDrawerSplitReview, {
-      review: "review_drawer_split",
+    .addEdge("respond", "plan_workspace_actions")
+    .addConditionalEdges("plan_workspace_actions", routeScopedInventorySplitReview, {
+      review: "review_inventory_split",
       end: END,
     })
-    .addEdge("review_drawer_split", END)
+    .addEdge("review_inventory_split", END)
     .compile({
       checkpointer,
     });
+}
+
+function graphInterrupts(result: unknown): Array<Record<string, unknown>> {
+  if (!isRecord(result) || !Array.isArray(result.__interrupt__)) {
+    return [];
+  }
+
+  return result.__interrupt__.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    return isRecord(entry.value) ? [entry.value] : [entry];
+  });
+}
+
+function memoryWriteVerificationErrorFromContext(context: Record<string, unknown>) {
+  return typeof context.memoryWriteVerificationError === "string"
+    ? context.memoryWriteVerificationError
+    : null;
 }
 
 export async function runQueryForFridgeImage(
   input: QueryGraphInput,
   deps: QueryGraphDependencies = {},
 ) {
-  const langsmith = assertLangSmithTracingEnabled();
   const promptBundle = deps.promptBundle ?? await loadPromptBundle();
   const graph = createQueryGraph({ ...deps, promptBundle });
   const normalizedInput = normalizeQueryInput(input);
-  const result = await graph.invoke(normalizedInput, {
-    runName: "query_fridge_inventory",
-    tags: ["fridgefriend", "query_graph", "chat"],
-    metadata: {
-      userId: normalizedInput.userId,
-      fridgeId: normalizedInput.fridgeId,
-      imageId: normalizedInput.imageId,
-      thread_id: normalizedInput.threadId,
-      langsmithProject: langsmith.project,
-      langsmithPromptEnvironment: langsmith.promptEnvironment,
-    },
-    configurable: {
-      thread_id: normalizedInput.threadId,
-    },
-  });
+  const result = await graph.invoke(normalizedInput, streamConfig(normalizedInput));
+  const interrupts = graphInterrupts(result);
+
+  if (interrupts.length > 0) {
+    return {
+      status: "interrupted" as const,
+      threadId: normalizedInput.threadId,
+      interrupts,
+      answer: null,
+      intent: result.intent,
+      visualEvidence: [],
+      workspaceActions: [],
+      groceryPlan: null,
+      groceryPlanError: null,
+      pantryCompletionPlan: null,
+      pantryCompletionError: null,
+      pantryCompletionClarification: null,
+      memoryWriteVerificationError: memoryWriteVerificationErrorFromContext(result.context),
+    };
+  }
 
   if (!result.answer) {
     throw new Error("Query graph completed without an answer");
   }
 
   return {
+    status: "completed" as const,
+    threadId: normalizedInput.threadId,
+    interrupts: [] as Array<Record<string, unknown>>,
     answer: result.answer,
     intent: result.intent,
     visualEvidence: result.visualEvidence,
     workspaceActions: workspaceActionsFromContext(result.context),
+    groceryPlan: groceryPlanFromContext(result.context),
+    groceryPlanError: groceryPlanErrorFromContext(result.context),
+    pantryCompletionPlan: pantryCompletionPlanFromContext(result.context),
+    pantryCompletionError: pantryCompletionErrorFromContext(result.context),
+    pantryCompletionClarification: pantryCompletionClarificationFromContext(result.context),
+    memoryWriteVerificationError: memoryWriteVerificationErrorFromContext(result.context),
   };
 }
 
-function streamConfig(input: QueryGraphInput) {
-  const langsmith = assertLangSmithTracingEnabled();
-  const normalizedInput = normalizeQueryInput(input);
+function streamConfig(normalizedInput: ReturnType<typeof normalizeQueryInput>) {
+  const langsmith = getLangSmithConfig();
 
   return {
     runName: "query_fridge_inventory",
     tags: ["fridgefriend", "query_graph", "chat"],
+    maxConcurrency: QUERY_GRAPH_MAX_CONCURRENCY,
     metadata: {
       userId: normalizedInput.userId,
       fridgeId: normalizedInput.fridgeId,
       imageId: normalizedInput.imageId,
       thread_id: normalizedInput.threadId,
-      langsmithProject: langsmith.project,
-      langsmithPromptEnvironment: langsmith.promptEnvironment,
+      ...(langsmith ? { langsmithProject: langsmith.project } : {}),
     },
     configurable: {
       thread_id: normalizedInput.threadId,
@@ -281,65 +390,116 @@ function streamConfig(input: QueryGraphInput) {
   };
 }
 
-function nodeStatusMessage(node: string) {
-  const messages: Record<string, string> = {
-    load_context: "Loaded query context.",
-    apply_seeded_inventory_assertions: "Applied selected inventory assertions.",
-    extract_memory_candidates: "Checked for durable memory updates.",
-    validate_memory_candidates: "Validated memory updates.",
-    persist_memory: "Saved durable memory updates.",
-    determine_intent: "Understood the request.",
-    query_inventory: "Prepared inventory lookup.",
-    propose_drawer_split: "Checked the selected drawer for separate inventory items.",
-    review_drawer_split: "Prepared the inventory split for review.",
-    plan_expiry: "Assessed freshness and food-waste priorities.",
-    assess_inventory_enrichment: "Checked whether more inventory detail is needed.",
-    run_focused_inventory_enrichment: "Inspected relevant inventory details.",
-    request_inventory_clarification: "Requested inventory clarification.",
-    build_recipe_search: "Built the local recipe search.",
-    retrieve_knowledge: "Retrieved food context.",
-    retrieve_recipes: "Retrieved local recipe options.",
-    grade_recipe_retrieval: "Checked recipe retrieval relevance.",
-    rewrite_recipe_query: "Refined the recipe search.",
-    evaluate_recipe: "Scored a recipe tournament candidate.",
-    resolve_recipe_tournament: "Selected recipe tournament finalists.",
-    calculate_space: "Calculated fridge space.",
-    request_clarification: "Prepared a clarification.",
-    plan_workspace_actions: "Prepared visual workspace updates.",
-    respond: "Drafting the answer.",
-  };
+// [active, done] status messages per node, keyed by graph node name.
+const NODE_STATUS_MESSAGES: Record<string, [active: string, done: string]> = {
+  load_context: ["Loading query context.", "Loaded query context."],
+  apply_seeded_inventory_assertions: ["Checking selected inventory assertions.", "Checked selected inventory assertions."],
+  extract_memory_candidates: ["Checking for durable memory updates.", "Checked for durable memory updates."],
+  validate_memory_candidates: ["Validating memory updates.", "Validated memory updates."],
+  apply_memory_writes: ["Checking durable memory writes.", "Checked durable memory writes."],
+  index_semantic_memory: ["Checking semantic memory indexing.", "Checked semantic memory indexing."],
+  reload_memory_context: ["Reloading durable memory context.", "Checked durable memory context."],
+  determine_intent: ["Understanding the request.", "Understood the request."],
+  query_inventory: ["Preparing inventory lookup.", "Prepared inventory lookup."],
+  propose_scoped_inventory_split: ["Checking the selected area for separate inventory items.", "Checked the selected area for separate inventory items."],
+  review_inventory_split: ["Preparing the inventory split for review.", "Prepared the inventory split for review."],
+  plan_expiry: ["Assessing freshness and food-waste priorities.", "Assessed freshness and food-waste priorities."],
+  assess_inventory_enrichment: ["Checking whether more inventory detail is needed.", "Checked whether more inventory detail is needed."],
+  run_focused_inventory_enrichment: ["Inspecting relevant inventory details.", "Inspected relevant inventory details."],
+  request_inventory_clarification: ["Requesting inventory clarification.", "Requested inventory clarification."],
+  persist_inventory_enrichment: ["Saving inventory enrichment.", "Saved inventory enrichment."],
+  build_recipe_search: ["Building the local recipe search.", "Built the local recipe search."],
+  retrieve_recipes: ["Retrieving local recipe options.", "Retrieved local recipe options."],
+  rank_retrieved_recipes: ["Ranking local recipe options.", "Ranked local recipe options."],
+  grade_recipe_retrieval: ["Checking recipe retrieval relevance.", "Checked recipe retrieval relevance."],
+  rewrite_recipe_query: ["Refining the recipe search.", "Refined the recipe search."],
+  evaluate_recipe: ["Scoring recipe tournament candidates.", "Scored a recipe tournament candidate."],
+  resolve_recipe_tournament: ["Ranking recipe suggestions.", "Ranked recipe suggestions."],
+  plan_groceries: ["Building the grocery plan.", "Built the grocery plan."],
+  plan_pantry_completion: ["Building the smart pantry completion plan.", "Built the smart pantry completion plan."],
+  plan_organization: ["Preparing the kitchen organization plan.", "Prepared the kitchen organization plan."],
+  plan_placement_correction: ["Preparing the inventory correction.", "Prepared the inventory correction."],
+  calculate_space: ["Calculating fridge space.", "Calculated fridge space."],
+  request_clarification: ["Preparing a clarification.", "Prepared a clarification."],
+  plan_workspace_actions: ["Preparing visual workspace updates.", "Prepared visual workspace updates."],
+  respond: ["Drafting the answer.", "Drafting the answer."],
+};
 
-  return messages[node] ?? `Finished ${node}.`;
+function nodeStatusMessage(node: string) {
+  return NODE_STATUS_MESSAGES[node]?.[1] ?? `Finished ${node}.`;
+}
+
+function memoryWriteResultsFromUpdate(update: Record<string, unknown>) {
+  return Array.isArray(update.memoryWriteResults)
+    ? update.memoryWriteResults.filter((entry): entry is { status: string; message?: string } =>
+      isRecord(entry) && typeof entry.status === "string"
+    )
+    : [];
+}
+
+function memoryVerificationFromContext(context: Record<string, unknown>) {
+  return isRecord(context.memoryWriteVerification) ? context.memoryWriteVerification : null;
+}
+
+function nodeStatusMessageForUpdate(
+  node: string,
+  update: Record<string, unknown>,
+  context: Record<string, unknown>,
+) {
+  if (node === "apply_memory_writes") {
+    const writes = memoryWriteResultsFromUpdate(update);
+    const persistedCount = writes.filter((write) => write.status === "persisted").length;
+    const skipped = writes.filter((write) => write.status === "skipped");
+
+    if (writes.length === 0) {
+      return "No durable memory writes were attempted.";
+    }
+
+    if (persistedCount === 0) {
+      const reasons = skipped
+        .flatMap((write) => typeof write.message === "string" && write.message.trim().length > 0 ? [write.message] : [])
+        .join("; ");
+      return reasons
+        ? `No durable memory was saved: ${reasons}`
+        : "No durable memory was saved.";
+    }
+
+    return `Persisted ${persistedCount} durable memory update${persistedCount === 1 ? "" : "s"}; awaiting reload verification.`;
+  }
+
+  if (node === "index_semantic_memory") {
+    const indexed = Array.isArray(update.indexedSemanticMemoryIds)
+      ? update.indexedSemanticMemoryIds.length
+      : 0;
+
+    return indexed > 0
+      ? `Indexed ${indexed} semantic memory update${indexed === 1 ? "" : "s"}.`
+      : "No semantic memory updates required indexing.";
+  }
+
+  if (node === "reload_memory_context") {
+    const verification = memoryVerificationFromContext(context);
+
+    if (verification && verification.status === "verified" && typeof verification.verifiedCount === "number") {
+      return `Verified ${verification.verifiedCount} durable memory update${verification.verifiedCount === 1 ? "" : "s"} in the profile.`;
+    }
+
+    if (verification && verification.status === "failed" && typeof verification.message === "string") {
+      return `Durable memory verification failed: ${verification.message}`;
+    }
+
+    if (verification && verification.status === "not_applicable" && typeof verification.message === "string") {
+      return verification.message;
+    }
+
+    return nodeStatusMessage(node);
+  }
+
+  return nodeStatusMessage(node);
 }
 
 function nodeActiveStatusMessage(node: string) {
-  const messages: Record<string, string> = {
-    load_context: "Loading query context.",
-    extract_memory_candidates: "Checking for durable memory updates.",
-    validate_memory_candidates: "Validating memory updates.",
-    persist_memory: "Saving durable memory updates.",
-    determine_intent: "Understanding the request.",
-    query_inventory: "Preparing inventory lookup.",
-    propose_drawer_split: "Checking the selected drawer for separate inventory items.",
-    review_drawer_split: "Preparing the inventory split for review.",
-    plan_expiry: "Assessing freshness and food-waste priorities.",
-    assess_inventory_enrichment: "Checking whether more inventory detail is needed.",
-    run_focused_inventory_enrichment: "Inspecting relevant inventory details.",
-    request_inventory_clarification: "Requesting inventory clarification.",
-    build_recipe_search: "Building the local recipe search.",
-    retrieve_knowledge: "Retrieving food context.",
-    retrieve_recipes: "Retrieving local recipe options.",
-    grade_recipe_retrieval: "Checking recipe retrieval relevance.",
-    rewrite_recipe_query: "Refining the recipe search.",
-    evaluate_recipe: "Scoring recipe tournament candidates.",
-    resolve_recipe_tournament: "Selecting recipe tournament finalists.",
-    calculate_space: "Calculating fridge space.",
-    request_clarification: "Preparing a clarification.",
-    plan_workspace_actions: "Preparing visual workspace updates.",
-    respond: "Drafting the answer.",
-  };
-
-  return messages[node] ?? `Running ${node}.`;
+  return NODE_STATUS_MESSAGES[node]?.[0] ?? `Running ${node}.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -347,15 +507,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isQueryIntent(value: unknown): value is QueryIntent {
-  return (
-    value === "inventory" ||
-    value === "expiry" ||
-    value === "food_knowledge" ||
-    value === "recipe" ||
-    value === "shopping" ||
-    value === "space" ||
-    value === "clarification"
-  );
+  return QueryIntentSchema.safeParse(value).success;
 }
 
 function extractStreamText(messageChunk: unknown) {
@@ -421,100 +573,15 @@ export function isVisibleResponseMessageMetadata(metadata: unknown) {
 }
 
 function isQueryStreamEvent(value: unknown): value is QueryStreamEvent {
-  if (!isRecord(value) || typeof value.type !== "string") {
-    return false;
-  }
-
-  if (value.type === "status") {
-    return typeof value.message === "string";
-  }
-
-  if (value.type === "tool") {
-    return (
-      typeof value.name === "string" &&
-      typeof value.message === "string" &&
-      (value.status === "started" ||
-        value.status === "progress" ||
-        value.status === "finished")
-    );
-  }
-
-  if (value.type === "token") {
-    return typeof value.text === "string";
-  }
-
-  if (value.type === "recipe_tournament_started") {
-    return (
-      typeof value.candidateCount === "number" &&
-      Number.isInteger(value.candidateCount) &&
-      value.candidateCount > 0 &&
-      typeof value.displaySlotCount === "number" &&
-      Number.isInteger(value.displaySlotCount) &&
-      value.displaySlotCount > 0
-    );
-  }
-
-  if (value.type === "recipe_tournament_update") {
-    return (
-      Array.isArray(value.recipes) &&
-      value.recipes.every((recipe) => isRecord(recipe) && recipeCardFromRecord(recipe) !== null) &&
-      typeof value.evaluatedCount === "number" &&
-      Number.isInteger(value.evaluatedCount) &&
-      typeof value.totalCount === "number" &&
-      Number.isInteger(value.totalCount) &&
-      Array.isArray(value.droppedRecipeIds) &&
-      value.droppedRecipeIds.every((recipeId) => typeof recipeId === "string")
-    );
-  }
-
-  if (value.type === "recipe_tournament_finished") {
-    return (
-      Array.isArray(value.recipes) &&
-      value.recipes.every((recipe) => isRecord(recipe) && recipeCardFromRecord(recipe) !== null)
-    );
-  }
-
-  if (value.type === "clarification") {
-    return Array.isArray(value.questions) && value.questions.every((question) =>
-      isRecord(question) &&
-      typeof question.itemId === "string" &&
-      typeof question.field === "string" &&
-      typeof question.question === "string"
-    );
-  }
-
-  if (value.type === "final") {
-    return typeof value.answer === "string" && Array.isArray(value.visualEvidence);
-  }
-
-  if (value.type === "workspace_action") {
-    return WorkspaceActionSchema.safeParse(value.action).success;
-  }
-
-  if (value.type === "agent_event") {
-    return AgentActivityEventSchema.safeParse(value.event).success;
-  }
-
-  if (value.type === "error") {
-    return typeof value.error === "string";
-  }
-
-  return false;
+  return QueryStreamEventSchema.safeParse(value).success;
 }
 
 function isQueryVisualEvidence(value: unknown): value is QueryVisualEvidence[] {
-  return Array.isArray(value) && value.every(
-    (entry) =>
-      isRecord(entry) &&
-      typeof entry.itemId === "string" &&
-      typeof entry.displayName === "string" &&
-      typeof entry.dataUrl === "string",
-  );
+  return z.array(QueryVisualEvidenceSchema).safeParse(value).success;
 }
 
-function workspaceActionsFromContext(value: unknown): WorkspaceAction[] {
-  if (!isRecord(value)) return [];
-  const parsed = z.array(WorkspaceActionSchema).safeParse(value.workspaceActions);
+function workspaceActionsFromContext(context: Record<string, unknown>): WorkspaceAction[] {
+  const parsed = z.array(WorkspaceActionSchema).safeParse(context.workspaceActions);
   return parsed.success ? parsed.data : [];
 }
 
@@ -529,42 +596,8 @@ function updateEntries(chunk: unknown): Array<[string, Record<string, unknown>]>
 }
 
 function recipeCardFromRecord(recipe: Record<string, unknown>): RecipeCard | null {
-  if (
-    typeof recipe.id !== "string" ||
-    typeof recipe.name !== "string" ||
-    typeof recipe.minutes !== "number" ||
-    !Array.isArray(recipe.matchedIngredients) ||
-    !Array.isArray(recipe.missingIngredients) ||
-    recipe.matchedIngredients.some((ingredient) => typeof ingredient !== "string") ||
-    recipe.missingIngredients.some((ingredient) => typeof ingredient !== "string") ||
-    (Array.isArray(recipe.matchedTags) &&
-      recipe.matchedTags.some((tag) => typeof tag !== "string")) ||
-    (Array.isArray(recipe.matchBadges) &&
-      recipe.matchBadges.some((badge) => typeof badge !== "string"))
-  ) {
-    return null;
-  }
-
-  return {
-    id: recipe.id,
-    name: recipe.name,
-    description: typeof recipe.description === "string" ? recipe.description : null,
-    minutes: recipe.minutes,
-    matchedIngredients: recipe.matchedIngredients,
-    missingIngredients: recipe.missingIngredients,
-    matchedTags: Array.isArray(recipe.matchedTags) && recipe.matchedTags.every((tag) => typeof tag === "string")
-      ? recipe.matchedTags
-      : [],
-    matchBadges: Array.isArray(recipe.matchBadges) && recipe.matchBadges.every((badge) => typeof badge === "string")
-      ? recipe.matchBadges
-      : [],
-    usesSoonIngredients: Array.isArray(recipe.usesSoonIngredients) && recipe.usesSoonIngredients.every((ingredient) => typeof ingredient === "string")
-      ? recipe.usesSoonIngredients
-      : undefined,
-    tournamentPlacement: recipe.tournamentPlacement === "winner" || recipe.tournamentPlacement === "finalist"
-      ? recipe.tournamentPlacement
-      : undefined,
-  };
+  const parsed = RecipeCardSchema.safeParse(recipe);
+  return parsed.success ? parsed.data : null;
 }
 
 function recipeCardFromRankedRecipe(recipe: RankedRecipe): RecipeCard {
@@ -578,16 +611,15 @@ function recipeCardFromRankedRecipe(recipe: RankedRecipe): RecipeCard {
     matchedTags: recipe.matchedTags,
     matchBadges: recipe.matchBadges,
     usesSoonIngredients: recipe.usesSoonIngredients,
-    tournamentPlacement: recipe.tournamentPlacement,
   };
 }
 
-function recipeCardsFromUpdate(update: Record<string, unknown>): RecipeCard[] {
-  if (!isRecord(update.context) || !isRecord(update.context.recipeRetrieval)) {
+function recipeCardsFromContext(context: Record<string, unknown>): RecipeCard[] {
+  if (!isRecord(context.recipeRetrieval)) {
     return [];
   }
 
-  const recipes = update.context.recipeRetrieval.recipes;
+  const recipes = context.recipeRetrieval.recipes;
 
   if (!Array.isArray(recipes)) {
     return [];
@@ -604,23 +636,14 @@ function recipeCardsFromUpdate(update: Record<string, unknown>): RecipeCard[] {
   });
 }
 
-function expiryPlanFromContext(value: unknown): ExpiryPlan | null {
-  if (!isRecord(value) || !isRecord(value.expiryPlan)) return null;
-  const plan = value.expiryPlan;
-  if (!Array.isArray(plan.items) || !Array.isArray(plan.priorityItems) || !Array.isArray(plan.expiredItems)) return null;
-  const validItem = (item: unknown) => isRecord(item) &&
-    typeof item.id === "string" &&
-    (typeof item.visibleItemId === "string" || item.visibleItemId === null) &&
-    typeof item.name === "string" && typeof item.ingredientName === "string" &&
-    typeof item.storageLocation === "string" && typeof item.date === "string" &&
-    typeof item.label === "string" && typeof item.wasteScore === "number" &&
-    Number.isFinite(item.wasteScore) &&
-    (item.urgency === "fresh" || item.urgency === "use_soon" || item.urgency === "urgent" || item.urgency === "expired" || item.urgency === "unknown") &&
-    (item.source === "user_date" || item.source === "observed_date" || item.source === "recorded_date" || item.source === "estimated") &&
-    (item.confidence === "high" || item.confidence === "medium" || item.confidence === "low") &&
-    (typeof item.dateIssue === "string" || item.dateIssue === null);
-  if (!plan.items.every(validItem) || !plan.priorityItems.every(validItem) || !plan.expiredItems.every(validItem)) return null;
-  return plan as unknown as ExpiryPlan;
+function expiryPlanFromContext(context: Record<string, unknown>): ExpiryPlan | null {
+  const parsed = ExpiryPlanSchema.safeParse(context.expiryPlan);
+  return parsed.success ? parsed.data : null;
+}
+
+function organizationPlanFromContext(context: Record<string, unknown>): OrganizationPlan | null {
+  const parsed = OrganizationPlanSchema.safeParse(context.organizationPlan);
+  return parsed.success ? parsed.data : null;
 }
 
 function rankedRecipesFromUpdate(value: unknown): RankedRecipe[] {
@@ -664,6 +687,7 @@ export async function* streamQueryForFridgeImage(
   input: QueryGraphInput,
   deps: QueryGraphDependencies = {},
   resume?: QueryResume,
+  continueExecution = false,
 ): AsyncGenerator<QueryStreamEvent> {
   const promptBundle = deps.promptBundle ?? await loadPromptBundle();
   const graph = createQueryGraph({ ...deps, promptBundle });
@@ -675,9 +699,26 @@ export async function* streamQueryForFridgeImage(
   let finalVisualEvidence: QueryVisualEvidence[] = [];
   let finalWorkspaceActions: WorkspaceAction[] = [];
   let finalExpiryPlan: ExpiryPlan | undefined;
+  let finalGroceryPlan: GroceryPlan | undefined;
+  let finalGroceryPlanError: string | undefined;
+  let finalPantryCompletionPlan: PantryCompletionPlan | undefined;
+  let finalPantryCompletionError: string | undefined;
+  let finalPantryCompletionClarification: string | undefined;
+  let finalOrganizationPlan: OrganizationPlan | undefined;
+  let finalDietaryRestrictions: DietaryRestrictionMemory[] = [];
+  let finalDietaryPreferences: DietaryPreferenceMemory[] = [];
+  let finalRecipeRetrievalAudit: z.infer<typeof RecipeRetrievalAuditSchema> | undefined;
   let tournamentCandidates: RankedRecipe[] = [];
   let tournamentEvaluations: RecipeTournamentEvaluation[] = [];
   let displayedTournamentRecipeIds: string[] = [];
+  let groceryPlannerRequested = false;
+  let pantryCompletionRequested = false;
+  let groceryPlanEmitted = false;
+  let groceryPlanErrorEmitted = false;
+  let pantryCompletionPlanEmitted = false;
+  let pantryCompletionErrorEmitted = false;
+  let pantryCompletionClarificationEmitted = false;
+  let finalMemoryWriteVerificationError: string | undefined;
 
   yield {
     type: "status",
@@ -686,7 +727,7 @@ export async function* streamQueryForFridgeImage(
   };
 
   const stream = await graph.stream(
-    resume ? new Command({ resume }) : normalizedInput,
+    continueExecution ? null : resume ? new Command({ resume }) : normalizedInput,
     {
     ...config,
     streamMode: ["updates", "messages", "custom"],
@@ -719,7 +760,7 @@ export async function* streamQueryForFridgeImage(
           }
           if (
             entry.value.type === "inventory_split_review" &&
-            typeof entry.value.zoneId === "string" &&
+            typeof entry.value.scopeLabel === "string" &&
             typeof entry.value.summary === "string" &&
             Array.isArray(entry.value.items) &&
             entry.value.items.every((item) => isRecord(item) && typeof item.label === "string" && typeof item.name === "string")
@@ -727,18 +768,34 @@ export async function* streamQueryForFridgeImage(
             interrupted = true;
             yield {
               type: "inventory_split_review",
-              zoneId: entry.value.zoneId,
+              scopeLabel: entry.value.scopeLabel,
               summary: entry.value.summary,
               items: entry.value.items as Array<{ label: string; name: string }>,
+            };
+          }
+          if (
+            entry.value.type === "inventory_mutation_review" &&
+            (entry.value.operation === "consume" || entry.value.operation === "remove") &&
+            typeof entry.value.itemName === "string" &&
+            typeof entry.value.storageLocation === "string"
+          ) {
+            interrupted = true;
+            yield {
+              type: "inventory_mutation_review",
+              operation: entry.value.operation,
+              itemName: entry.value.itemName,
+              storageLocation: entry.value.storageLocation,
             };
           }
         }
       }
       for (const [node, update] of updateEntries(chunk)) {
+        const context = isRecord(update.context) ? update.context : {};
+
         yield {
           type: "status",
           node,
-          message: nodeStatusMessage(node),
+          message: nodeStatusMessageForUpdate(node, update, context),
         };
 
         if (typeof update.answer === "string") {
@@ -749,11 +806,33 @@ export async function* streamQueryForFridgeImage(
           finalIntent = update.intent;
         }
 
+        if (Array.isArray(update.dietaryRestrictions)) {
+          finalDietaryRestrictions = update.dietaryRestrictions as DietaryRestrictionMemory[];
+        }
+
+        if (Array.isArray(update.dietaryPreferences)) {
+          finalDietaryPreferences = update.dietaryPreferences as DietaryPreferenceMemory[];
+        }
+
+        const recipeRetrievalAudit = RecipeRetrievalAuditSchema.safeParse(update.recipeRetrievalAudit);
+        if (recipeRetrievalAudit.success) {
+          finalRecipeRetrievalAudit = recipeRetrievalAudit.data;
+        }
+
+        if (isRecord(context.intentRouting)) {
+          groceryPlannerRequested = context.intentRouting.shoppingMode === "grocery_planner";
+          pantryCompletionRequested = context.intentRouting.shoppingMode === "pantry_completion";
+        }
+
         if (isQueryVisualEvidence(update.visualEvidence)) {
           finalVisualEvidence = update.visualEvidence;
         }
 
-        const workspaceActions = workspaceActionsFromContext(update.context);
+        if (typeof context.memoryWriteVerificationError === "string") {
+          finalMemoryWriteVerificationError = context.memoryWriteVerificationError;
+        }
+
+        const workspaceActions = workspaceActionsFromContext(context);
         if (workspaceActions.length > 0) {
           finalWorkspaceActions = workspaceActions;
           for (const action of workspaceActions) {
@@ -761,19 +840,75 @@ export async function* streamQueryForFridgeImage(
           }
         }
 
-        const expiryPlan = expiryPlanFromContext(update.context);
+        const expiryPlan = expiryPlanFromContext(context);
         if (expiryPlan) {
           finalExpiryPlan = expiryPlan;
           yield { type: "expiry_plan", plan: expiryPlan };
         }
 
-        const recipeCards = recipeCardsFromUpdate(update);
+        const groceryPlan = groceryPlanFromContext(context);
+        if (groceryPlan) {
+          finalGroceryPlan = groceryPlan;
+          finalGroceryPlanError = undefined;
+          if (!groceryPlanEmitted) {
+            groceryPlanEmitted = true;
+            yield { type: "grocery_plan", plan: groceryPlan };
+          }
+        }
+
+        const groceryPlanError = groceryPlanErrorFromContext(context);
+        if (groceryPlanError) {
+          finalGroceryPlanError = groceryPlanError;
+          if (!groceryPlanErrorEmitted) {
+            groceryPlanErrorEmitted = true;
+            yield { type: "grocery_plan_error", error: groceryPlanError };
+          }
+        }
+
+        const pantryCompletionPlan = pantryCompletionPlanFromContext(context);
+        if (pantryCompletionPlan) {
+          finalPantryCompletionPlan = pantryCompletionPlan;
+          finalPantryCompletionError = undefined;
+          finalPantryCompletionClarification = undefined;
+          if (!pantryCompletionPlanEmitted) {
+            pantryCompletionPlanEmitted = true;
+            yield { type: "pantry_completion", plan: pantryCompletionPlan };
+          }
+        }
+
+        const pantryCompletionError = pantryCompletionErrorFromContext(context);
+        if (pantryCompletionError) {
+          finalPantryCompletionError = pantryCompletionError;
+          if (!pantryCompletionErrorEmitted) {
+            pantryCompletionErrorEmitted = true;
+            yield { type: "pantry_completion_error", error: pantryCompletionError };
+          }
+        }
+
+        const pantryCompletionClarification = pantryCompletionClarificationFromContext(context);
+        if (pantryCompletionClarification) {
+          finalPantryCompletionPlan = undefined;
+          finalPantryCompletionError = undefined;
+          finalPantryCompletionClarification = pantryCompletionClarification;
+          if (!pantryCompletionClarificationEmitted) {
+            pantryCompletionClarificationEmitted = true;
+            yield { type: "pantry_completion_clarification", message: pantryCompletionClarification };
+          }
+        }
+
+        const organizationPlan = organizationPlanFromContext(context);
+        if (organizationPlan) {
+          finalOrganizationPlan = organizationPlan;
+          yield { type: "organization_plan", plan: organizationPlan };
+        }
+
+        const recipeCards = recipeCardsFromContext(context);
 
         if (recipeCards.length > 0) {
           finalRecipeCards = recipeCards;
         }
 
-        if (node === "retrieve_recipes") {
+        if (node === "rank_retrieved_recipes" && !groceryPlannerRequested && !pantryCompletionRequested) {
           tournamentCandidates = rankedRecipesFromUpdate(update.tournamentCandidates);
           tournamentEvaluations = [];
           displayedTournamentRecipeIds = [];
@@ -787,7 +922,7 @@ export async function* streamQueryForFridgeImage(
           }
         }
 
-        if (node === "evaluate_recipe" && tournamentCandidates.length > 0) {
+        if (node === "evaluate_recipe" && tournamentCandidates.length > 0 && !groceryPlannerRequested && !pantryCompletionRequested) {
           const nextEvaluations = tournamentEvaluationsFromUpdate(update.tournamentEvaluations);
           const evaluationsByRecipeId = new Map<string, RecipeTournamentEvaluation>();
 
@@ -819,7 +954,7 @@ export async function* streamQueryForFridgeImage(
           };
         }
 
-        if (node === "resolve_recipe_tournament" && recipeCards.length > 0) {
+        if (node === "resolve_recipe_tournament" && recipeCards.length > 0 && !groceryPlannerRequested && !pantryCompletionRequested) {
           displayedTournamentRecipeIds = recipeCards.map((recipe) => recipe.id);
           yield {
             type: "recipe_tournament_finished",
@@ -860,9 +995,19 @@ export async function* streamQueryForFridgeImage(
         answer: finalAnswer,
         intent: finalIntent,
         recipes: finalRecipeCards,
+        groceryPlan: finalGroceryPlan,
+        groceryPlanError: finalGroceryPlanError,
+        pantryCompletionPlan: finalPantryCompletionPlan,
+        pantryCompletionError: finalPantryCompletionError,
+        pantryCompletionClarification: finalPantryCompletionClarification,
+        organizationPlan: finalOrganizationPlan,
         visualEvidence: finalVisualEvidence,
+        dietaryRestrictions: finalDietaryRestrictions,
+        dietaryPreferences: finalDietaryPreferences,
         workspaceActions: finalWorkspaceActions,
         agentEvents: [],
+        retrievalAudit: finalRecipeRetrievalAudit,
+        memoryWriteVerificationError: finalMemoryWriteVerificationError,
       };
     }
     return;
@@ -878,22 +1023,89 @@ export async function* streamQueryForFridgeImage(
     intent: finalIntent,
     recipes: finalRecipeCards,
     expiryPlan: finalExpiryPlan,
+    groceryPlan: finalGroceryPlan,
+    groceryPlanError: finalGroceryPlanError,
+    pantryCompletionPlan: finalPantryCompletionPlan,
+    pantryCompletionError: finalPantryCompletionError,
+    pantryCompletionClarification: finalPantryCompletionClarification,
+    organizationPlan: finalOrganizationPlan,
     visualEvidence: finalVisualEvidence,
+    dietaryRestrictions: finalDietaryRestrictions,
+    dietaryPreferences: finalDietaryPreferences,
     workspaceActions: finalWorkspaceActions,
     agentEvents: [],
+    retrievalAudit: finalRecipeRetrievalAudit,
+    memoryWriteVerificationError: finalMemoryWriteVerificationError,
   };
+}
+
+export async function* continueQueryForFridgeThread(
+  input: { threadId: string },
+  deps: QueryGraphDependencies = {},
+): AsyncGenerator<QueryStreamEvent> {
+  const promptBundle = deps.promptBundle ?? await loadPromptBundle();
+  const graph = createQueryGraph({ ...deps, promptBundle });
+  const state = await graph.getState({ configurable: { thread_id: input.threadId } });
+  const values = state.values as Partial<FridgeQueryStateValue>;
+
+  if (state.next.length === 0) {
+    if (typeof values.answer !== "string" || values.answer.length === 0) {
+      throw new Error(`Query thread ${input.threadId} has no pending execution to continue`);
+    }
+
+    const context = isRecord(values.context) ? values.context : {};
+    yield {
+      type: "final",
+      answer: values.answer,
+      intent: isQueryIntent(values.intent) ? values.intent : null,
+      recipes: recipeCardsFromContext(context),
+      expiryPlan: expiryPlanFromContext(context) ?? undefined,
+      groceryPlan: groceryPlanFromContext(context) ?? undefined,
+      groceryPlanError: groceryPlanErrorFromContext(context) ?? undefined,
+      pantryCompletionPlan: pantryCompletionPlanFromContext(context) ?? undefined,
+      pantryCompletionError: pantryCompletionErrorFromContext(context) ?? undefined,
+      pantryCompletionClarification: pantryCompletionClarificationFromContext(context) ?? undefined,
+      organizationPlan: organizationPlanFromContext(context) ?? undefined,
+      visualEvidence: isQueryVisualEvidence(values.visualEvidence) ? values.visualEvidence : [],
+      dietaryRestrictions: Array.isArray(values.dietaryRestrictions) ? values.dietaryRestrictions : [],
+      dietaryPreferences: Array.isArray(values.dietaryPreferences) ? values.dietaryPreferences : [],
+      workspaceActions: workspaceActionsFromContext(context),
+      agentEvents: [],
+      retrievalAudit: RecipeRetrievalAuditSchema.safeParse(values.recipeRetrievalAudit).data,
+      memoryWriteVerificationError: memoryWriteVerificationErrorFromContext(context) ?? undefined,
+    };
+    return;
+  }
+  if (
+    typeof values.fridgeId !== "string" ||
+    typeof values.query !== "string" ||
+    (values.imageId !== null && typeof values.imageId !== "string")
+  ) {
+    throw new Error(`Query thread ${input.threadId} has an invalid checkpoint state`);
+  }
+
+  for await (const event of streamQueryForFridgeImage({
+    userId: typeof values.userId === "string" ? values.userId : DEFAULT_USER_ID,
+    fridgeId: values.fridgeId,
+    imageId: values.imageId,
+    query: values.query,
+    threadId: input.threadId,
+  }, { ...deps, promptBundle }, undefined, true)) {
+    yield event;
+  }
 }
 
 export async function* resumeQueryForFridgeImage(
   input: { threadId: string; resume: QueryResume },
   deps: QueryGraphDependencies = {},
 ) {
+  // streamQueryForFridgeImage loads the prompt bundle when deps omit one.
   for await (const event of streamQueryForFridgeImage({
     fridgeId: "resume",
     imageId: null,
     query: "resume",
     threadId: input.threadId,
-  }, { ...deps, promptBundle: deps.promptBundle ?? await loadPromptBundle() }, input.resume)) {
+  }, deps, input.resume)) {
     yield event;
   }
 }

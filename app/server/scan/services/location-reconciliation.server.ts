@@ -2,6 +2,7 @@ import {
   type FridgeZoneDetection,
   type NormalizedBoundingBox,
   type RawDetection,
+  type ZoneType,
 } from "../schemas/inventory";
 import type {
   AmbiguousLocationRequest,
@@ -10,83 +11,101 @@ import type {
 } from "../schemas/scan-result";
 import type { ScanStateValue } from "../state";
 
-export const MIN_ZONE_MATCH_SCORE = 0.45;
-export const MIN_ZONE_MATCH_MARGIN = 0.12;
+const STORAGE_SUPPORT_ZONE_TYPES = new Set<ZoneType>([
+  "shelf",
+  "door_shelf",
+  "drawer",
+  "freezer",
+  "pantry",
+]);
 
-export function area(box: NormalizedBoundingBox) {
-  return box.width * box.height;
+function isStorageSupportZone(zone: FridgeZoneDetection) {
+  return STORAGE_SUPPORT_ZONE_TYPES.has(zone.type);
 }
 
-export function intersectionArea(
-  a: NormalizedBoundingBox,
-  b: NormalizedBoundingBox,
+function intervalOverlap(
+  leftStart: number,
+  leftEnd: number,
+  rightStart: number,
+  rightEnd: number,
 ) {
-  const left = Math.max(a.x, b.x);
-  const top = Math.max(a.y, b.y);
-  const right = Math.min(a.x + a.width, b.x + b.width);
-  const bottom = Math.min(a.y + a.height, b.y + b.height);
-
-  if (right <= left || bottom <= top) {
-    return 0;
-  }
-
-  return (right - left) * (bottom - top);
+  return Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart);
 }
 
-export function itemContainmentRatio(
+function horizontalOverlapRatio(
   item: NormalizedBoundingBox,
   zone: NormalizedBoundingBox,
 ) {
-  const itemArea = area(item);
+  const overlap = Math.max(0, intervalOverlap(
+    item.x,
+    item.x + item.width,
+    zone.x,
+    zone.x + zone.width,
+  ));
+  const denominator = Math.min(item.width, zone.width);
 
-  if (itemArea === 0) {
+  if (denominator <= 0) {
     return 0;
   }
 
-  return Math.min(1, intersectionArea(item, zone) / itemArea);
+  return Math.min(1, overlap / denominator);
 }
 
-export function isItemCenterInsideZone(
+function verticalOverlapRatio(
   item: NormalizedBoundingBox,
   zone: NormalizedBoundingBox,
 ) {
-  const centerX = item.x + item.width / 2;
-  const centerY = item.y + item.height / 2;
+  const overlap = Math.max(0, intervalOverlap(
+    item.y,
+    item.y + item.height,
+    zone.y,
+    zone.y + zone.height,
+  ));
+  const denominator = Math.min(item.height, zone.height);
 
+  if (denominator <= 0) {
+    return 0;
+  }
+
+  return Math.min(1, overlap / denominator);
+}
+
+function boxContainsPoint(
+  box: NormalizedBoundingBox,
+  point: { x: number; y: number },
+) {
   return (
-    centerX >= zone.x &&
-    centerX <= zone.x + zone.width &&
-    centerY >= zone.y &&
-    centerY <= zone.y + zone.height
+    point.x >= box.x &&
+    point.x <= box.x + box.width &&
+    point.y >= box.y &&
+    point.y <= box.y + box.height
   );
 }
 
-export function scoreZoneMatch(
+function itemBottomY(detection: RawDetection) {
+  return detection.bbox.y + detection.bbox.height;
+}
+
+function zoneSurfaceY(zone: FridgeZoneDetection) {
+  return zone.bbox.y + zone.bbox.height;
+}
+
+function matchZoneSurface(
   detection: RawDetection,
   zone: FridgeZoneDetection,
 ): ZoneMatch {
-  const containmentRatio = itemContainmentRatio(
+  const surfaceDistance = Math.abs(itemBottomY(detection) - zoneSurfaceY(zone));
+  const overlapRatio = horizontalOverlapRatio(
     detection.bbox,
     zone.bbox,
   );
-  const centerContained = isItemCenterInsideZone(
-    detection.bbox,
-    zone.bbox,
-  );
-  let score = containmentRatio * 0.7;
-
-  if (centerContained) {
-    score += 0.25;
-  }
-
-  score += zone.conf * 0.05;
 
   return {
     detectionId: detection.id,
     zoneDetectionId: zone.id,
-    score,
-    containmentRatio,
-    centerContained,
+    score: Math.max(0, 1 - surfaceDistance),
+    surfaceDistance,
+    horizontalOverlapRatio: overlapRatio,
   };
 }
 
@@ -94,58 +113,144 @@ export function resolveDetectionZone(
   detection: RawDetection,
   zones: FridgeZoneDetection[],
 ): ReconciledLocation {
-  const candidateZones = zones.filter((zone) => zone.img === detection.img);
-  const matches = candidateZones
-    .map((zone) => scoreZoneMatch(detection, zone))
-    .sort((a, b) => b.score - a.score);
+  const supportZones = zones
+    .filter((zone) => zone.img === detection.img)
+    .filter(isStorageSupportZone);
+  const detectionCenter = {
+    x: detection.bbox.x + detection.bbox.width / 2,
+    y: detection.bbox.y + detection.bbox.height / 2,
+  };
+  const matches = supportZones
+    .map((zone) => ({
+      zone,
+      match: matchZoneSurface(detection, zone),
+      verticalOverlapRatio: verticalOverlapRatio(detection.bbox, zone.bbox),
+      containsCenter: boxContainsPoint(zone.bbox, detectionCenter),
+    }))
+    .filter(({ match, verticalOverlapRatio }) =>
+      match.horizontalOverlapRatio > 0 && verticalOverlapRatio > 0
+    )
+    .sort((left, right) =>
+      Number(right.containsCenter) - Number(left.containsCenter) ||
+      right.verticalOverlapRatio - left.verticalOverlapRatio ||
+      right.match.horizontalOverlapRatio - left.match.horizontalOverlapRatio ||
+      left.match.surfaceDistance - right.match.surfaceDistance ||
+      right.zone.conf - left.zone.conf ||
+      left.zone.id.localeCompare(right.zone.id)
+    );
   const best = matches[0];
-  const second = matches[1];
 
   if (!best) {
+    if (supportZones.length > 0) {
+      return {
+        status: "needs_review",
+        detectionId: detection.id,
+        reason: `No same-image storage support surface contains detection ${detection.id}`,
+      };
+    }
+
     return {
       status: "unmatched",
       detectionId: detection.id,
-      reason: "No same-image zone candidates were available",
-    };
-  }
-
-  if (best.score < MIN_ZONE_MATCH_SCORE) {
-    return {
-      status: "ambiguous",
-      detectionId: detection.id,
-      candidates: matches.slice(0, 2),
-      reason: "No zone candidate cleared the geometry score threshold",
-    };
-  }
-
-  if (second && best.score - second.score < MIN_ZONE_MATCH_MARGIN) {
-    return {
-      status: "ambiguous",
-      detectionId: detection.id,
-      candidates: matches.slice(0, 2),
-      reason: "The best zone candidate was too close to the next candidate",
-    };
-  }
-
-  const zone = candidateZones.find(
-    (candidate) => candidate.id === best.zoneDetectionId,
-  );
-
-  if (!zone) {
-    return {
-      status: "unmatched",
-      detectionId: detection.id,
-      reason: `Matched zone ${best.zoneDetectionId} was not present in zone map`,
+      reason: `No same-image storage support surfaces were available for image ${detection.img}`,
     };
   }
 
   return {
     status: "matched",
     detectionId: detection.id,
-    zone,
-    score: best.score,
-    match: best,
+    zone: best.zone,
+    score: best.match.score,
+    match: best.match,
   };
+}
+
+function inheritedStackLocation(
+  detection: RawDetection,
+  supportLocation: ReconciledLocation,
+): ReconciledLocation {
+  if (supportLocation.status !== "matched") {
+    return {
+      status: "unmatched",
+      detectionId: detection.id,
+      reason: `Cannot place stacked detection ${detection.id} because support detection ${supportLocation.detectionId} was not matched`,
+    };
+  }
+
+  return {
+    status: "matched",
+    detectionId: detection.id,
+    zone: supportLocation.zone,
+    score: supportLocation.score,
+    match: {
+      ...supportLocation.match,
+      detectionId: detection.id,
+    },
+  };
+}
+
+function resolveDetectionLocations(
+  detections: RawDetection[],
+  zones: FridgeZoneDetection[],
+) {
+  const detectionsById = new Map(detections.map((detection) => [
+    detection.id,
+    detection,
+  ]));
+  const resolvedLocations = new Map<string, ReconciledLocation>();
+  const resolving = new Set<string>();
+
+  function resolve(detection: RawDetection): ReconciledLocation {
+    const existing = resolvedLocations.get(detection.id);
+
+    if (existing) {
+      return existing;
+    }
+
+    if (resolving.has(detection.id)) {
+      return {
+        status: "unmatched",
+        detectionId: detection.id,
+        reason: `Cannot place detection ${detection.id} because stack references form a cycle`,
+      };
+    }
+
+    resolving.add(detection.id);
+
+    try {
+      if (detection.stack?.on) {
+        const supportDetection = detectionsById.get(detection.stack.on);
+
+        if (!supportDetection) {
+          return {
+            status: "unmatched",
+            detectionId: detection.id,
+            reason: `Cannot place stacked detection ${detection.id} because support detection ${detection.stack.on} was not found`,
+          };
+        }
+
+        if (supportDetection.img !== detection.img) {
+          return {
+            status: "unmatched",
+            detectionId: detection.id,
+            reason: `Cannot place stacked detection ${detection.id} because support detection ${supportDetection.id} is in image ${supportDetection.img}`,
+          };
+        }
+
+        return inheritedStackLocation(detection, resolve(supportDetection));
+      }
+
+      return resolveDetectionZone(detection, zones);
+    } finally {
+      resolving.delete(detection.id);
+    }
+  }
+
+  return detections.map((detection) => {
+    const location = resolve(detection);
+    resolvedLocations.set(detection.id, location);
+    return location;
+  });
 }
 
 function buildAmbiguousLocationRequest(
@@ -213,10 +318,25 @@ export async function reconcileLocations(state: ScanStateValue): Promise<{
   }
 
   const zones = state.zoneMaps.flatMap((zoneMap) => zoneMap.zones);
-  const reconciledLocations = state.rawDetections.map((detection) =>
-    resolveDetectionZone(detection, zones),
+  const reconciledLocations = resolveDetectionLocations(
+    state.rawDetections,
+    zones,
   );
   const ambiguousLocationRequests: AmbiguousLocationRequest[] = [];
+  const unmatchedLocation = reconciledLocations.find(
+    (location) => location.status === "unmatched",
+  );
+
+  if (unmatchedLocation) {
+    return {
+      reconciledLocations,
+      ambiguousLocationRequests,
+      reconciliationValidation: {
+        valid: false,
+        reason: unmatchedLocation.reason,
+      },
+    };
+  }
 
   for (const location of reconciledLocations
     .filter(

@@ -1,20 +1,40 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import {
   type Inventory,
   type InventoryItem,
+  type RawDetection,
 } from "../server/scan/schemas/inventory";
 import type { WorkspaceFocus } from "../workspace/contracts";
 import {
   dominantWeightedAverageColor,
   type VisualColorTarget,
 } from "./item-wireframe-color";
+import {
+  buildInventoryPlacementLayout,
+  buildImageGroundedPlacementLayout,
+  imageXToWorld,
+  imageYToWorld,
+  SCENE_HEIGHT,
+  SCENE_WIDTH,
+  SHELF_THICKNESS,
+  type InventoryZone,
+  type ScenePlacement,
+  zoneClearanceHeight,
+  zoneSurfaceY,
+  zoneWorldZBounds,
+} from "./fridge-placement";
 
 type FridgeInventoryCanvasProps = {
+  finalizationId?: number;
   inventory: Inventory;
   imageDataUrls: Record<string, string>;
+  isLoading?: boolean;
+  loadingIndicator?: ReactNode;
+  rawDetections?: RawDetection[];
+  transitionRawDetections?: RawDetection[];
   workspaceFocus?: WorkspaceFocus;
   previewPlacements?: Array<{ itemId: string; zoneId: string }>;
   onSelectItem?(itemId: string): void;
@@ -22,11 +42,15 @@ type FridgeInventoryCanvasProps = {
   onSelectZone?(zoneId: string): void;
   onClearSelection?(): void;
   onHoverItem?(itemId: string | null): void;
+  onFinalizationComplete?(): void;
 };
 
 type SceneItem = {
-  item: InventoryItem;
-  supportZone: InventoryZone | null;
+  id: string;
+  item: InventoryItem | null;
+  pack: InventoryItem["pack"];
+  imageId: string;
+  boundingBox: InventoryItem["loc"]["observations"][number]["boundingBox"];
   x: number;
   y: number;
   z: number;
@@ -36,338 +60,32 @@ type SceneItem = {
   color: number;
 };
 
-type InventoryZone = Inventory["zones"][number];
-type InventoryObservation =
-  InventoryItem["loc"]["observations"][number];
-const SCENE_WIDTH = 5;
-const SCENE_HEIGHT = 7;
-const SCENE_DEPTH = 2.2;
-const SHELF_THICKNESS = 0.05;
-const CAMERA_FRUSTUM_HEIGHT = 8.4;
-const MIN_RENDERED_ITEM_HEIGHT = 0.12;
-const FLAT_PACKAGE_MIN_HEIGHT_RATIO = 0.16;
-const FLAT_PACKAGE_MAX_HEIGHT_RATIO = 0.42;
-const EGG_CARTON_LONG_SIDE_RATIO = 2.4;
-const EGG_CARTON_MIN_ZONE_WIDTH_RATIO = 0.22;
-const ZONE_WIREFRAME_COLOR = 0xd1d5db;
-const ZONE_CLEARANCE_WIREFRAME_COLOR = 0xe5e7eb;
-const UPRIGHT_PACKAGE_MIN_HEIGHT_RATIO: Partial<
-  Record<InventoryItem["pack"], number>
-> = {
-  bottle: 2.4,
-  can: 1.15,
-  jar: 0.95,
-  carton: 1.35,
-  bag: 0.65,
-  container: 0.55,
-  unknown: 0.55,
+type RenderedItemObjects = {
+  mesh: THREE.Mesh;
+  outline: THREE.Group;
 };
 
-function imageXToWorld(x: number) {
-  return (x - 0.5) * SCENE_WIDTH;
-}
-
-function imageYToWorld(y: number) {
-  return (0.5 - y) * SCENE_HEIGHT;
-}
-
-function zoneSurfaceY(zone: InventoryZone) {
-  return imageYToWorld(zone.boundingBox.y + zone.boundingBox.height);
-}
-
-function zoneCeilingY(zone: InventoryZone) {
-  return imageYToWorld(zone.boundingBox.y);
-}
-
-function zoneSurfaceImageY(zone: InventoryZone) {
-  return zone.boundingBox.y + zone.boundingBox.height;
-}
-
-function zoneClearanceHeight(zone: InventoryZone, zones: InventoryZone[]) {
-  if (zone.type !== "shelf") {
-    return zoneCeilingY(zone) - zoneSurfaceY(zone);
-  }
-
-  const surfaceImageY = zoneSurfaceImageY(zone);
-  const nearestSurfaceAbove = zones
-    .filter((candidate) => candidate.id !== zone.id)
-    .filter((candidate) => candidate.type === "shelf")
-    .filter((candidate) => candidate.imageIds.some(
-      (imageId) => zone.imageIds.includes(imageId),
-    ))
-    .map(zoneSurfaceImageY)
-    .filter((candidateSurfaceY) => candidateSurfaceY < surfaceImageY)
-    .sort((a, b) => b - a)[0];
-  const ceilingImageY = nearestSurfaceAbove ?? 0;
-
-  return (surfaceImageY - ceilingImageY) * SCENE_HEIGHT;
-}
-
-function zoneWorldXBounds(zone: InventoryZone) {
-  return {
-    left: imageXToWorld(zone.boundingBox.x),
-    right: imageXToWorld(zone.boundingBox.x + zone.boundingBox.width),
-  };
-}
-
-function zoneWorldZBounds(zone: InventoryZone) {
-  return {
-    back: -SCENE_DEPTH / 2,
-    front: SCENE_DEPTH / 2,
-  };
-}
-
-function fitInsideBounds(value: number, size: number, minimum: number, maximum: number) {
-  const insideMinimum = minimum + size / 2;
-  const insideMaximum = maximum - size / 2;
-
-  if (insideMinimum > insideMaximum) {
-    return (minimum + maximum) / 2;
-  }
-
-  return Math.min(Math.max(value, insideMinimum), insideMaximum);
-}
-
-function bboxXOnZone(
-  observation: InventoryObservation,
-  zone: InventoryZone,
-  width: number,
-) {
-  const bounds = zoneWorldXBounds(zone);
-  const x = imageXToWorld(
-    observation.boundingBox.x + observation.boundingBox.width / 2,
-  );
-
-  return fitInsideBounds(x, width, bounds.left, bounds.right);
-}
-
-function bboxZOnZone(
-  observation: InventoryObservation,
-  zone: InventoryZone,
-  depth: number,
-) {
-  if (observation.depthBackRatio === null) {
-    throw new Error(`Cannot render item observation for image ${observation.imageId} because depthBackRatio is null`);
-  }
-
-  const bounds = zoneWorldZBounds(zone);
-  const z = bounds.back + (bounds.front - bounds.back) * observation.depthBackRatio;
-
-  return fitInsideBounds(z, depth, bounds.back, bounds.front);
-}
-
-function isSupportZone(zone: InventoryZone) {
-  return (
-    zone.type === "shelf" ||
-    zone.type === "door_shelf" ||
-    zone.type === "drawer" ||
-    zone.type === "freezer" ||
-    zone.type === "pantry"
-  );
-}
-
-function resolveSupportZone(
-  item: InventoryItem,
-  zonesById: Map<string, InventoryZone>,
-) {
-  const matchedZone = item.loc.zoneId
-    ? zonesById.get(item.loc.zoneId)
-    : null;
-
-  if (!item.loc.zoneId) {
-    return null;
-  }
-
-  if (!matchedZone) {
-    throw new Error(`Cannot render item ${item.id} because matched zone ${item.loc.zoneId} was not found`);
-  }
-
-  if (!isSupportZone(matchedZone)) {
-    throw new Error(`Cannot render item ${item.id} because matched zone ${item.loc.zoneId} has unsupported type ${matchedZone.type}`);
-  }
-
-  return matchedZone;
-}
-
-function isFlatPackage(item: InventoryItem, observation: InventoryObservation) {
-  if (isEggPackage(item)) {
-    return true;
-  }
-
-  const label = `${item.label} ${item.name}`.toLowerCase();
-  const imageAspectRatio =
-    observation.boundingBox.width / observation.boundingBox.height;
-
-  return (
-    item.pack === "tray" ||
-    (item.pack === "box" && imageAspectRatio >= 1.35)
-  );
-}
-
-function isEggPackage(item: InventoryItem) {
-  const label = `${item.label} ${item.name}`.toLowerCase();
-
-  return (
-    label.includes("egg carton") ||
-    label.includes("carton of eggs") ||
-    /\begg\b/.test(label) ||
-    /\beggs\b/.test(label)
-  );
-}
-
-function fitItemFootprint(
-  item: InventoryItem,
-  observation: InventoryObservation,
-  rawWidth: number,
-  rawDepth: number,
-  zoneWidth: number,
-  zoneDepth: number,
-) {
-  const fittedWidth = Math.min(rawWidth, zoneWidth);
-  const fittedDepth = Math.min(rawDepth, zoneDepth);
-
-  if (!isEggPackage(item)) {
-    return {
-      width: fittedWidth,
-      depth: fittedDepth,
-    };
-  }
-
-  const shortSide = Math.max(Math.min(fittedWidth, fittedDepth), 0.12);
-  const maxLongSide = Math.max(zoneWidth, zoneDepth);
-  const longSide = Math.min(
-    Math.max(
-      Math.max(fittedWidth, fittedDepth),
-      shortSide * EGG_CARTON_LONG_SIDE_RATIO,
-      maxLongSide * EGG_CARTON_MIN_ZONE_WIDTH_RATIO,
-    ),
-    maxLongSide,
-  );
-  const imageAspectRatio = observation.boundingBox.width /
-    Math.max(observation.boundingBox.height, Number.EPSILON);
-  const prefersDepth = imageAspectRatio < 0.85;
-  const widthFootprint = {
-    width: Math.min(longSide, zoneWidth),
-    depth: Math.min(shortSide, zoneDepth),
-  };
-  const depthFootprint = {
-    width: Math.min(shortSide, zoneWidth),
-    depth: Math.min(longSide, zoneDepth),
-  };
-
-  if (prefersDepth && longSide <= zoneDepth) {
-    return depthFootprint;
-  }
-
-  if (!prefersDepth && longSide <= zoneWidth) {
-    return widthFootprint;
-  }
-
-  if (longSide <= zoneDepth) {
-    return depthFootprint;
-  }
-
-  return widthFootprint;
-}
-
-function fittedItemHeight(
-  item: InventoryItem,
-  observation: InventoryObservation,
-  width: number,
-  depth: number,
-  rawHeight: number,
-  clearanceHeight: number,
-) {
-  const footprintShortSide = Math.min(width, depth);
-  const detectedVisualHeight = observation.boundingBox.height * SCENE_HEIGHT;
-  const availableHeight = Math.max(clearanceHeight, MIN_RENDERED_ITEM_HEIGHT);
-
-  if (isFlatPackage(item, observation)) {
-    const minimumFlatHeight = Math.max(
-      footprintShortSide * FLAT_PACKAGE_MIN_HEIGHT_RATIO,
-      MIN_RENDERED_ITEM_HEIGHT,
-    );
-    const maximumFlatHeight = Math.max(
-      footprintShortSide * FLAT_PACKAGE_MAX_HEIGHT_RATIO,
-      minimumFlatHeight,
-    );
-
-    return Math.min(
-      Math.max(rawHeight, minimumFlatHeight),
-      maximumFlatHeight,
-      availableHeight,
-    );
-  }
-
-  const uprightHeightRatio =
-    UPRIGHT_PACKAGE_MIN_HEIGHT_RATIO[item.pack] ?? 0;
-  const minimumUprightHeight = Math.max(
-    footprintShortSide * uprightHeightRatio,
-    detectedVisualHeight,
-    MIN_RENDERED_ITEM_HEIGHT,
-  );
-
-  return Math.min(Math.max(rawHeight, minimumUprightHeight), availableHeight);
-}
-
-function itemDimensions(
-  item: InventoryItem,
-  observation: InventoryObservation,
-  supportZone: InventoryZone,
-  zones: InventoryZone[],
-) {
-  const xBounds = zoneWorldXBounds(supportZone);
-  const zBounds = zoneWorldZBounds(supportZone);
-  const zoneWidth = xBounds.right - xBounds.left;
-  const zoneDepth = zBounds.front - zBounds.back;
-  const clearanceHeight = zoneClearanceHeight(supportZone, zones) -
-    SHELF_THICKNESS;
-  const rawWidth = observation.boundingBox.width * SCENE_WIDTH;
-  const rawHeight = observation.boundingBox.height * SCENE_HEIGHT;
-  const rawDepth = Math.min(
-    zoneDepth,
-    rawWidth / Math.max(zoneWidth, Number.EPSILON) * zoneDepth,
-  );
-  const { width: fittedWidth, depth: fittedDepth } = fitItemFootprint(
-    item,
-    observation,
-    rawWidth,
-    rawDepth,
-    zoneWidth,
-    zoneDepth,
-  );
-  const fittedHeight = fittedItemHeight(
-    item,
-    observation,
-    fittedWidth,
-    fittedDepth,
-    rawHeight,
-    clearanceHeight,
-  );
-
-  return {
-    width: fittedWidth,
-    height: fittedHeight,
-    depth: fittedDepth,
-  };
-}
+const CAMERA_FRUSTUM_HEIGHT = 8.4;
+const ZONE_WIREFRAME_COLOR = 0xd1d5db;
+const ZONE_CLEARANCE_WIREFRAME_COLOR = 0xe5e7eb;
+const FINALIZATION_MOVE_DURATION_MS = 520;
 
 function createItemGeometry(sceneItem: SceneItem) {
-  const { item, width, height, depth } = sceneItem;
+  const { pack, width, height, depth } = sceneItem;
 
-  if (item.pack === "bottle" || item.pack === "can") {
+  if (pack === "bottle" || pack === "can") {
     const geometry = new THREE.CylinderGeometry(0.5, 0.5, height, 18, 1);
     geometry.scale(width, 1, depth);
     return geometry;
   }
 
-  if (item.pack === "jar") {
+  if (pack === "jar") {
     const geometry = new THREE.CylinderGeometry(0.5, 0.5, height, 16, 1);
     geometry.scale(width, 1, depth);
     return geometry;
   }
 
-  if (item.pack === "loose") {
+  if (pack === "loose") {
     const geometry = new THREE.SphereGeometry(0.5, 14, 10);
     geometry.scale(width, height, depth);
     return geometry;
@@ -446,106 +164,14 @@ function disposeObject(object: THREE.Object3D) {
   }
 }
 
-function createSceneItem(
-  item: InventoryItem,
-  zonesById: Map<string, InventoryZone>,
-  zones: InventoryZone[],
-  itemColors: Map<string, number>,
-): SceneItem | null {
-  const observation = item.loc.observations[0];
-
-  if (!observation) {
-    return null;
-  }
-
-  const supportZone = resolveSupportZone(
-    item,
-    zonesById,
-  );
-
-  if (!supportZone) {
-    return null;
-  }
-
-  const dimensions = itemDimensions(
-    item,
-    observation,
-    supportZone,
-    zones,
-  );
-  const x = bboxXOnZone(observation, supportZone, dimensions.width);
-  const z = bboxZOnZone(observation, supportZone, dimensions.depth);
-  const y =
-    zoneSurfaceY(supportZone) + SHELF_THICKNESS / 2 + dimensions.height / 2;
-  const color = itemColors.get(item.id);
-
-  if (color === undefined) {
-    throw new Error(`Cannot render item ${item.id} because its wireframe color was not calculated`);
-  }
-
-  return {
-    item,
-    supportZone,
-    x,
-    y,
-    z,
-    ...dimensions,
-    color,
-  };
-}
-
-function applyStacking(sceneItems: SceneItem[]) {
-  const sceneItemsById = new Map(
-    sceneItems.map((sceneItem) => [sceneItem.item.id, sceneItem]),
-  );
-  for (let pass = 0; pass < sceneItems.length; pass += 1) {
-    for (const sceneItem of sceneItems) {
-      const stackedOnDetectionId = sceneItem.item.stack?.on;
-
-      if (!stackedOnDetectionId) {
-        continue;
-      }
-
-      const supportItem = sceneItemsById.get(stackedOnDetectionId);
-
-      if (!supportItem) {
-        throw new Error(`Cannot stack item ${sceneItem.item.id} because support item ${stackedOnDetectionId} was not rendered`);
-      }
-
-      sceneItem.z = supportItem.z;
-      sceneItem.y =
-        supportItem.y + supportItem.height / 2 + sceneItem.height / 2;
-    }
-  }
-}
-
-function buildSceneItems(inventory: Inventory, itemColors: Map<string, number>): SceneItem[] {
-  const zonesById = new Map(inventory.zones.map((zone) => [zone.id, zone]));
-  const sceneItems = inventory.items
-    .map((item) => createSceneItem(item, zonesById, inventory.zones, itemColors))
-    .filter((sceneItem): sceneItem is SceneItem => sceneItem !== null);
-
-  applyStacking(sceneItems);
-
-  return sceneItems;
-}
-
-function renderableItemColorTargets(inventory: Inventory): VisualColorTarget[] {
-  const zonesById = new Map(inventory.zones.map((zone) => [zone.id, zone]));
-
-  return inventory.items.flatMap((item) => {
+function renderableItemColorTargets(
+  inventory: Inventory,
+  rawDetections: RawDetection[],
+): VisualColorTarget[] {
+  const inventoryTargets = inventory.items.flatMap((item) => {
     const observation = item.loc.observations[0];
 
     if (!observation) {
-      return [];
-    }
-
-    const supportZone = resolveSupportZone(
-      item,
-      zonesById,
-    );
-
-    if (!supportZone) {
       return [];
     }
 
@@ -555,6 +181,64 @@ function renderableItemColorTargets(inventory: Inventory): VisualColorTarget[] {
       boundingBox: observation.boundingBox,
     }];
   });
+
+  const rawTargets = rawDetections.map((detection) => ({
+    itemId: detection.id,
+    imageId: detection.img,
+    boundingBox: detection.bbox,
+  }));
+  const targetsByItemId = new Map<string, VisualColorTarget>();
+
+  for (const target of [...inventoryTargets, ...rawTargets]) {
+    targetsByItemId.set(target.itemId, target);
+  }
+
+  return [...targetsByItemId.values()];
+}
+
+function finalSceneItem(
+  placement: ScenePlacement,
+  color: number,
+): SceneItem {
+  const observation = placement.item.loc.observations[0];
+
+  if (!observation) {
+    throw new Error(`Cannot render item ${placement.item.id} because it has no observation`);
+  }
+
+  return {
+    id: placement.item.id,
+    item: placement.item,
+    pack: placement.item.pack,
+    imageId: observation.imageId,
+    boundingBox: observation.boundingBox,
+    x: placement.x,
+    y: placement.y,
+    z: placement.z,
+    width: placement.width,
+    height: placement.height,
+    depth: placement.depth,
+    color,
+  };
+}
+
+function applyWorkspaceFocus(
+  renderedItems: Map<string, RenderedItemObjects>,
+  workspaceFocus: WorkspaceFocus | undefined,
+) {
+  for (const [itemId, renderedItem] of renderedItems) {
+    const focused = workspaceFocus?.itemIds.includes(itemId) ?? false;
+    const shouldDim = workspaceFocus?.emphasis === "isolate" && !focused;
+    const baseOpacity = shouldDim ? 0.2 : focused ? 1 : 0.96;
+    const material = renderedItem.mesh.material as THREE.MeshBasicMaterial;
+
+    renderedItem.mesh.userData.baseOpacity = baseOpacity;
+
+    material.opacity = baseOpacity;
+    material.transparent = baseOpacity < 1;
+
+    renderedItem.outline.visible = focused;
+  }
 }
 
 function loadSourceImage(dataUrl: string, imageId: string) {
@@ -728,24 +412,6 @@ async function calculateItemWireframeColors(
   return colors;
 }
 
-function formatPercent(value: number | null) {
-  return value === null ? "Unknown" : `${Math.round(value * 100)}%`;
-}
-
-function formatLocation(item: InventoryItem, inventory: Inventory) {
-  if (!item.loc.zoneId) {
-    return item.loc.status;
-  }
-
-  const zone = inventory.zones.find(
-    (candidate) => candidate.id === item.loc.zoneId,
-  );
-
-  return zone
-    ? `${item.loc.status} · ${zone.label} (${zone.id})`
-    : `${item.loc.status} · ${item.loc.zoneId}`;
-}
-
 function selectSmallestItemHit(
   itemHits: THREE.Intersection<THREE.Object3D>[],
 ) {
@@ -758,8 +424,13 @@ function selectSmallestItemHit(
 }
 
 export function FridgeInventoryCanvas({
+  finalizationId = 0,
   inventory,
   imageDataUrls,
+  isLoading = false,
+  loadingIndicator,
+  rawDetections = [],
+  transitionRawDetections = [],
   workspaceFocus,
   previewPlacements = [],
   onSelectItem,
@@ -767,10 +438,23 @@ export function FridgeInventoryCanvas({
   onSelectZone,
   onClearSelection,
   onHoverItem,
+  onFinalizationComplete,
 }: FridgeInventoryCanvasProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const hoveredMeshRef = useRef<THREE.Mesh | null>(null);
   const cameraStateRef = useRef<{ position: THREE.Vector3; target: THREE.Vector3 } | null>(null);
+  const renderedItemsRef = useRef<Map<string, RenderedItemObjects>>(new Map());
+  const previousSceneItemsRef = useRef<Map<string, SceneItem>>(new Map());
+  const playedFinalizationIdRef = useRef(0);
+  const workspaceFocusRef = useRef(workspaceFocus);
+  const callbacksRef = useRef({
+    onSelectItem,
+    onSeedItem,
+    onSelectZone,
+    onClearSelection,
+    onHoverItem,
+    onFinalizationComplete,
+  });
   const lastItemClickRef = useRef<{
     key: string;
     time: number;
@@ -779,7 +463,19 @@ export function FridgeInventoryCanvas({
   } | null>(null);
   const [itemColors, setItemColors] = useState<Map<string, number> | null>(null);
   const [itemColorError, setItemColorError] = useState<Error | null>(null);
-  const colorTargets = useMemo(() => renderableItemColorTargets(inventory), [inventory]);
+  callbacksRef.current = {
+    onSelectItem,
+    onSeedItem,
+    onSelectZone,
+    onClearSelection,
+    onHoverItem,
+    onFinalizationComplete,
+  };
+  workspaceFocusRef.current = workspaceFocus;
+  const colorTargets = useMemo(
+    () => renderableItemColorTargets(inventory, rawDetections),
+    [inventory, rawDetections],
+  );
   const colorTargetsKey = useMemo(() => colorTargets.map((target) => [
     target.itemId,
     target.imageId,
@@ -789,12 +485,42 @@ export function FridgeInventoryCanvas({
     target.boundingBox.height,
   ].join(":")).join("|"), [colorTargets]);
   const imageDataUrlsKey = useMemo(() => Object.keys(imageDataUrls).sort().join("|"), [imageDataUrls]);
-  const sceneItems = useMemo(
-    () => itemColors && colorTargets.every((target) => itemColors.has(target.itemId))
-      ? buildSceneItems(inventory, itemColors)
-      : [],
-    [colorTargets, inventory, itemColors],
-  );
+  const sceneItems = useMemo(() => {
+    if (!itemColors || !colorTargets.every((target) => itemColors.has(target.itemId))) {
+      return [];
+    }
+
+    if (rawDetections.length > 0) return [];
+
+    const directSupportZoneByItemId = new Map(
+      previewPlacements.map((placement) => [placement.itemId, placement.zoneId]),
+    );
+
+    const placements = inventory.sceneVersion === "image-grounded-v2"
+      ? buildImageGroundedPlacementLayout(inventory)
+      : buildInventoryPlacementLayout(inventory, directSupportZoneByItemId);
+
+    return placements.map((placement) => {
+      const color = itemColors.get(placement.item.id);
+
+      if (color === undefined) {
+        throw new Error(`Cannot render item ${placement.item.id} because its wireframe color was not calculated`);
+      }
+
+      return finalSceneItem(placement, color);
+    });
+  }, [colorTargets, inventory, itemColors, previewPlacements, rawDetections]);
+  const transitionOriginsByItemId = useMemo(() => {
+    if (!itemColors || rawDetections.length > 0) {
+      return new Map<string, SceneItem>();
+    }
+
+    return new Map<string, SceneItem>();
+  }, [itemColors, rawDetections.length, transitionRawDetections]);
+  const workspaceFocusKey = [
+    workspaceFocus?.itemIds.join(",") ?? "",
+    workspaceFocus?.emphasis ?? "",
+  ].join(":");
 
   if (itemColorError) {
     throw itemColorError;
@@ -828,6 +554,10 @@ export function FridgeInventoryCanvas({
       cancelled = true;
     };
   }, [colorTargetsKey, imageDataUrlsKey]);
+
+  useEffect(() => {
+    applyWorkspaceFocus(renderedItemsRef.current, workspaceFocusRef.current);
+  }, [workspaceFocusKey]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -877,9 +607,18 @@ export function FridgeInventoryCanvas({
 
     const zoneMeshes: THREE.Mesh[] = [];
     const itemMeshes: THREE.Mesh[] = [];
-    const previewZoneByItemId = new Map(previewPlacements.map((placement) => [placement.itemId, placement.zoneId]));
-
-    for (const zone of inventory.zones) {
+    const renderedItems = new Map<string, RenderedItemObjects>();
+    const transitionTargets: Array<{
+      object: THREE.Object3D;
+      origin: THREE.Vector3;
+      target: THREE.Vector3;
+    }> = [];
+    const visibleZones = rawDetections.length === 0 ? inventory.zones : [];
+    const shouldTransition =
+      rawDetections.length === 0 &&
+      finalizationId > 0 &&
+      playedFinalizationIdRef.current !== finalizationId;
+    for (const zone of visibleZones) {
       const box = zone.boundingBox;
       const zoneWidth = box.width * SCENE_WIDTH;
       const zoneHeight =
@@ -912,7 +651,7 @@ export function FridgeInventoryCanvas({
       disposableObjects.push(zoneFrame);
 
       if (zone.type === "shelf" || zone.type === "door_shelf") {
-        const clearanceHeight = zoneClearanceHeight(zone, inventory.zones);
+        const clearanceHeight = zoneClearanceHeight(zone, visibleZones);
         const clearanceFrame = createWireframeBox(
           zoneWidth,
           clearanceHeight,
@@ -931,13 +670,7 @@ export function FridgeInventoryCanvas({
     }
 
     for (const sceneItem of sceneItems) {
-      const previewZone = inventory.zones.find((zone) => zone.id === previewZoneByItemId.get(sceneItem.item.id));
-      const previewPosition = previewZone ? {
-        x: imageXToWorld(previewZone.boundingBox.x + previewZone.boundingBox.width / 2),
-        y: zoneSurfaceY(previewZone) + sceneItem.height / 2,
-        z: 0,
-      } : null;
-      const position = previewPosition ?? { x: sceneItem.x, y: sceneItem.y, z: sceneItem.z };
+      const position = { x: sceneItem.x, y: sceneItem.y, z: sceneItem.z };
       const footprintBoxGeometry = new THREE.BoxGeometry(
         sceneItem.width,
         0.012,
@@ -958,31 +691,52 @@ export function FridgeInventoryCanvas({
       disposableObjects.push(footprintFrame);
 
       const geometry = createItemGeometry(sceneItem);
-      const focused = workspaceFocus?.itemIds.includes(sceneItem.item.id) ?? false;
-      const shouldDim = workspaceFocus?.emphasis === "isolate" && !focused;
-      const material = createWireframeMaterial(
-        sceneItem.color,
-        shouldDim ? 0.2 : focused ? 1 : 0.96,
-      );
+      const material = createWireframeMaterial(sceneItem.color, 0.96);
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(position.x, position.y, position.z);
       mesh.userData = {
-        targetType: "item",
+        targetType: sceneItem.item ? "item" : "raw_item",
         item: sceneItem.item,
         baseColor: sceneItem.color,
-        baseOpacity: shouldDim ? 0.2 : focused ? 1 : 0.96,
+        baseOpacity: 0.96,
         renderedVolume: sceneItem.width * sceneItem.height * sceneItem.depth,
       };
-      itemMeshes.push(mesh);
       group.add(mesh);
       disposableObjects.push(mesh);
 
-      if (focused) {
+      if (sceneItem.item) {
+        itemMeshes.push(mesh);
         const outline = createFocusedOutline(geometry, 0x111827);
         outline.position.copy(mesh.position);
+        outline.visible = false;
         group.add(outline);
         disposableObjects.push(outline);
+        renderedItems.set(sceneItem.id, { mesh, outline });
+
+        const origin = shouldTransition
+          ? transitionOriginsByItemId.get(sceneItem.id) ?? previousSceneItemsRef.current.get(sceneItem.id)
+          : undefined;
+
+        if (origin) {
+          for (const object of [footprintFrame, mesh, outline]) {
+            const target = object.position.clone();
+            const originPosition = target.clone();
+            originPosition.x = origin.x;
+            originPosition.y += origin.y - sceneItem.y;
+            originPosition.z = origin.z;
+            object.position.copy(originPosition);
+            transitionTargets.push({ object, origin: originPosition, target });
+          }
+        }
       }
+    }
+
+    renderedItemsRef.current = renderedItems;
+    previousSceneItemsRef.current = new Map(sceneItems.map((sceneItem) => [sceneItem.id, sceneItem]));
+    applyWorkspaceFocus(renderedItems, workspaceFocusRef.current);
+
+    if (transitionTargets.length > 0) {
+      playedFinalizationIdRef.current = finalizationId;
     }
 
     const raycaster = new THREE.Raycaster();
@@ -1005,13 +759,16 @@ export function FridgeInventoryCanvas({
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
-      const itemHit = selectSmallestItemHit(raycaster.intersectObjects(itemMeshes, false));
+      const itemHit = selectSmallestItemHit(raycaster.intersectObjects(
+        itemMeshes.filter((mesh) => mesh.visible),
+        false,
+      ));
       const [zoneHit] = raycaster.intersectObjects(zoneMeshes, false);
       const hit = itemHit ?? zoneHit;
 
       if (!hit?.object) {
         resetHoveredMesh();
-        onHoverItem?.(null);
+        callbacksRef.current.onHoverItem?.(null);
         return;
       }
 
@@ -1032,16 +789,16 @@ export function FridgeInventoryCanvas({
       }
 
       if (mesh.userData.targetType === "zone") {
-        onHoverItem?.(null);
+        callbacksRef.current.onHoverItem?.(null);
       } else {
         const item = mesh.userData.item as InventoryItem;
-        onHoverItem?.(item.id);
+        callbacksRef.current.onHoverItem?.(item.id);
       }
     }
 
     function handlePointerLeave() {
       resetHoveredMesh();
-      onHoverItem?.(null);
+      callbacksRef.current.onHoverItem?.(null);
     }
 
     function handleClick(event: MouseEvent) {
@@ -1054,7 +811,7 @@ export function FridgeInventoryCanvas({
       const target = itemHit?.object ?? zoneHit?.object;
       if (!target) {
         lastItemClickRef.current = null;
-        onClearSelection?.();
+        callbacksRef.current.onClearSelection?.();
         return;
       }
       if (target.userData.targetType === "item") {
@@ -1080,7 +837,7 @@ export function FridgeInventoryCanvas({
 
         if (event.detail >= 2 || (sameRenderedItem && closeInTime && closeInSpace)) {
           lastItemClickRef.current = null;
-          onSeedItem?.(item);
+          callbacksRef.current.onSeedItem?.(item);
           return;
         }
 
@@ -1090,10 +847,10 @@ export function FridgeInventoryCanvas({
           x: event.clientX,
           y: event.clientY,
         };
-        onSelectItem?.(item.id);
+        callbacksRef.current.onSelectItem?.(item.id);
       } else {
         lastItemClickRef.current = null;
-        onSelectZone?.((target.userData.zone as InventoryZone).id);
+        callbacksRef.current.onSelectZone?.((target.userData.zone as InventoryZone).id);
       }
     }
 
@@ -1121,20 +878,47 @@ export function FridgeInventoryCanvas({
     resize();
 
     let animationFrame = 0;
+    let finalizationComplete = false;
+    const finalizationStartedAt = transitionTargets.length > 0
+      ? window.performance.now()
+      : null;
 
-    function render() {
+    function render(timestamp: number) {
       animationFrame = window.requestAnimationFrame(render);
+
+      if (finalizationStartedAt !== null) {
+        const progress = Math.min(
+          1,
+          (timestamp - finalizationStartedAt) / FINALIZATION_MOVE_DURATION_MS,
+        );
+        const easedProgress = 1 - (1 - progress) ** 3;
+
+        for (const transition of transitionTargets) {
+          transition.object.position.lerpVectors(
+            transition.origin,
+            transition.target,
+            easedProgress,
+          );
+        }
+
+        if (progress === 1 && !finalizationComplete) {
+          finalizationComplete = true;
+          callbacksRef.current.onFinalizationComplete?.();
+        }
+      }
+
       controls.update();
       renderer.render(scene, camera);
     }
 
-    render();
+    render(window.performance.now());
 
     return () => {
       cameraStateRef.current = {
         position: camera.position.clone(),
         target: controls.target.clone(),
       };
+      renderedItemsRef.current = new Map();
       window.cancelAnimationFrame(animationFrame);
       renderer.domElement.removeEventListener("pointermove", handlePointerMove);
       renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
@@ -1149,11 +933,16 @@ export function FridgeInventoryCanvas({
 
       renderer.dispose();
     };
-  }, [inventory, onClearSelection, onHoverItem, onSeedItem, onSelectItem, onSelectZone, previewPlacements, sceneItems, workspaceFocus]);
+  }, [finalizationId, inventory, rawDetections.length, sceneItems, transitionOriginsByItemId]);
 
   return (
-    <section className="fridge-canvas-panel" aria-label="Reconciled inventory">
+    <section
+      aria-busy={isLoading}
+      aria-label="Reconciled inventory"
+      className="fridge-canvas-panel"
+    >
       <div className="fridge-canvas" ref={mountRef} />
+      {isLoading ? <div className="fridge-canvas-loading">{loadingIndicator}</div> : null}
     </section>
   );
 }

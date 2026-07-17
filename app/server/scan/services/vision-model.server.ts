@@ -1,14 +1,14 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-
-import { requiredEnv } from "../../env.server";
-import { IMAGE_VALIDATION_MODEL, VISION_MODEL } from "../schemas/inventory";
+import {
+  CHAT_IMAGE_VALIDATION_MODEL as IMAGE_VALIDATION_MODEL,
+  CHAT_VISION_PROVIDER as VISION_PROVIDER,
+  CHAT_VISION_MODEL as VISION_MODEL,
+  createChatModel,
+} from "../../ai/chat-model.server";
 
 export function createVisionModel(model = VISION_MODEL) {
-  return new ChatGoogleGenerativeAI({
+  return createChatModel({
     model,
-    temperature: 0,
-    maxRetries: 0,
-    apiKey: requiredEnv("GOOGLE_API_KEY"),
+    provider: VISION_PROVIDER,
   });
 }
 

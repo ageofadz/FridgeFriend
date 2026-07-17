@@ -5,33 +5,60 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ReactNode,
 } from "react";
 
 import type { FridgeImage, StorageImageLocation } from "../server/images.server";
-import type { ExternalInventoryMemory } from "../server/memory/schemas";
+import type {
+  DietaryPreferenceMemory,
+  DietaryRestrictionMemory,
+  ExternalInventoryMemory,
+  GoalMemory,
+  SemanticMemory,
+} from "../server/memory/schemas";
 import type {
   Inventory,
   InventoryItem,
   NormalizedBoundingBox,
+  RawDetection,
 } from "../server/scan/schemas/inventory";
 import {
+  STORAGE_IMAGE_LOCATIONS,
   emptyWorkspaceFocus,
   focusFromWorkspaceAction,
   inventorySeedCropId,
   type AgentActivityEvent,
+  type ConversationContext,
   type ConversationContextSeededItem,
   type WorkspaceAction,
   type WorkspaceFocus,
 } from "../workspace/contracts";
 import { FridgeInventoryCanvas } from "./FridgeInventoryCanvas";
-import { FridgeQueryChat } from "./FridgeQueryChat";
+import {
+  FoodLoadingIndicator,
+  FridgeQueryChat,
+  GroceryPlanArtifact,
+  loadingFoodEmojis,
+} from "./FridgeQueryChat";
+import type { GroceryPlan, PantryCompletionSuggestion } from "./query-stream";
+import type { PersistedChat } from "../chat/contracts";
 
 type AgentWorkspaceProps = {
+  initialChat: PersistedChat;
+  inventoryFinalizationId: number;
   fridgeId: string;
   imageId: string | null;
   locationImages: Partial<Record<StorageImageLocation, FridgeImage>>;
   inventory: Inventory;
   externalInventory: ExternalInventoryMemory[];
+  dietaryRestrictions: DietaryRestrictionMemory[];
+  dietaryPreferences: DietaryPreferenceMemory[];
+  activeGoals: GoalMemory[];
+  semanticMemories: SemanticMemory[];
+  streamedRawDetections?: RawDetection[];
+  streamedStorageLocation?: StorageImageLocation | null;
+  transitionRawDetections?: RawDetection[];
+  isInventorySceneLoading: boolean;
   uploadStatusByLocation: Record<StorageImageLocation, {
     isUploading: boolean;
     error: string | null;
@@ -39,11 +66,13 @@ type AgentWorkspaceProps = {
   }>;
   onDeleteImage(imageId: string): void;
   onInventoryUpdated(inventory: Inventory): void;
+  onResetUserProfile(): void;
   onUploadImage(event: ChangeEvent<HTMLInputElement>, storageLocation: StorageImageLocation): void;
+  onInventoryFinalized?(): void;
 };
 
 type DraftRequest = { id: string; text: string };
-type WorkspaceLocation = StorageImageLocation | "all_inventory";
+type WorkspaceLocation = StorageImageLocation | "all_inventory" | "grocery_list" | "user_profile";
 type AllInventoryStorageFilter = "all" | StorageImageLocation;
 type PhotoMetrics = {
   left: number;
@@ -55,14 +84,9 @@ type DrawState = {
   start: { x: number; y: number };
   current: { x: number; y: number };
 };
-type SeedBoundingBoxResponse = {
-  status: "known_item" | "created_item";
-  cropId: string;
-  item: InventoryItem;
-  inventory: Inventory;
-  draftText: string;
-};
-const STORAGE_IMAGE_LOCATIONS = ["fridge", "freezer", "pantry"] as const;
+function isStorageWorkspaceLocation(candidate: WorkspaceLocation): candidate is StorageImageLocation {
+  return STORAGE_IMAGE_LOCATIONS.includes(candidate as StorageImageLocation);
+}
 
 const CATEGORY_LABELS: Record<InventoryItem["cat"], string> = {
   produce: "Produce",
@@ -77,15 +101,57 @@ const CATEGORY_LABELS: Record<InventoryItem["cat"], string> = {
   other: "Other",
 };
 
+function groceryIngredientKey(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
+
+export function mergePantryCompletionItems(
+  plan: GroceryPlan,
+  suggestions: PantryCompletionSuggestion[],
+): GroceryPlan {
+  const items = plan.items.map((item) => ({
+    ...item,
+    recipeIds: [...item.recipeIds],
+    recipeNames: [...item.recipeNames],
+  }));
+
+  for (const suggestion of suggestions) {
+    const index = items.findIndex((item) => groceryIngredientKey(item.ingredient) === groceryIngredientKey(suggestion.ingredient));
+    if (index === -1) {
+      items.push({
+        ingredient: suggestion.ingredient,
+        aisle: suggestion.aisle,
+        recipeIds: [...suggestion.recipeIds],
+        recipeNames: [...suggestion.recipeNames],
+      });
+      continue;
+    }
+
+    items[index] = {
+      ...items[index],
+      recipeIds: [...new Set([...items[index].recipeIds, ...suggestion.recipeIds])],
+      recipeNames: [...new Set([...items[index].recipeNames, ...suggestion.recipeNames])],
+    };
+  }
+
+  return { ...plan, items };
+}
+
 function activeItem(items: InventoryItem[], itemIds: string[]) {
   return items.find((item) => itemIds.includes(item.id)) ?? null;
 }
 
-function itemPrompt(item: InventoryItem, action: "quantity" | "recipe" | "correct" | "consume") {
-  if (action === "quantity") return `How much of ${item.label} is left?`;
-  if (action === "recipe") return `What can I make with ${item.label}?`;
-  if (action === "correct") return `Correct ${item.label}: `;
-  return `Mark ${item.label} as consumed.`;
+function itemPrompt(action: "quantity" | "recipe" | "correct" | "consume") {
+  if (action === "quantity") return `How much of this is left?`;
+  if (action === "recipe") return `What can I make with this?`;
+  if (action === "correct") return `Get more detail about this.`;
+  return `I ran out of this.`;
 }
 
 function formatQuantity(item: InventoryItem) {
@@ -99,6 +165,123 @@ function formatExternalQuantity(item: ExternalInventoryMemory) {
   if (!item.quantity) return "Quantity unknown";
   if (item.quantity.amount === null) return item.quantity.unit;
   return `${item.quantity.amount} ${item.quantity.unit}`;
+}
+
+function formatProfileLabel(value: string) {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function UserProfileMemorySection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="user-profile-memory-section">
+      <h4>{title}</h4>
+      {children}
+    </section>
+  );
+}
+
+function UserProfileArtifact({
+  dietaryRestrictions,
+  dietaryPreferences,
+  activeGoals,
+  semanticMemories,
+  onReset,
+}: {
+  dietaryRestrictions: DietaryRestrictionMemory[];
+  dietaryPreferences: DietaryPreferenceMemory[];
+  activeGoals: GoalMemory[];
+  semanticMemories: SemanticMemory[];
+  onReset(): void;
+}) {
+  const memoryCount =
+    dietaryRestrictions.length +
+    dietaryPreferences.length +
+    activeGoals.length +
+    semanticMemories.length;
+
+  return (
+    <section className="user-profile-artifact" aria-label="User profile">
+      <header className="user-profile-artifact-heading">
+        <div>
+          <h3>User profile</h3>
+          <p>{memoryCount === 0 ? "No user memories stored." : `${memoryCount} user ${memoryCount === 1 ? "memory" : "memories"} stored.`}</p>
+        </div>
+        <button
+          disabled={memoryCount === 0}
+          onClick={() => {
+            if (window.confirm("Reset user profile memories?")) {
+              onReset();
+            }
+          }}
+          type="button"
+        >
+          Reset
+        </button>
+      </header>
+      <div className="user-profile-memory-grid">
+        <UserProfileMemorySection title="Dietary restrictions">
+          {dietaryRestrictions.length > 0 ? (
+            <ul>
+              {dietaryRestrictions.map((memory) => (
+                <li key={memory.id}>
+                  <strong>{memory.subject}</strong>
+                  <span>{formatProfileLabel(memory.restrictionType)} · {formatProfileLabel(memory.severity)}</span>
+                  {memory.notes ? <small>{memory.notes}</small> : null}
+                </li>
+              ))}
+            </ul>
+          ) : <p>None</p>}
+        </UserProfileMemorySection>
+        <UserProfileMemorySection title="Preferences">
+          {dietaryPreferences.length > 0 ? (
+            <ul>
+              {dietaryPreferences.map((memory) => (
+                <li key={memory.id}>
+                  <strong>{memory.subject}</strong>
+                  <span>{formatProfileLabel(memory.sentiment)} · strength {memory.strength}</span>
+                  {memory.notes ? <small>{memory.notes}</small> : null}
+                </li>
+              ))}
+            </ul>
+          ) : <p>None</p>}
+        </UserProfileMemorySection>
+        <UserProfileMemorySection title="Goals">
+          {activeGoals.length > 0 ? (
+            <ul>
+              {activeGoals.map((memory) => (
+                <li key={memory.id}>
+                  <strong>{memory.description}</strong>
+                  <span>{formatProfileLabel(memory.goalType)} · priority {memory.priority}</span>
+                  {memory.targetValue !== null && memory.targetUnit ? <small>{memory.targetValue} {memory.targetUnit}</small> : null}
+                </li>
+              ))}
+            </ul>
+          ) : <p>None</p>}
+        </UserProfileMemorySection>
+        <UserProfileMemorySection title="Other memories">
+          {semanticMemories.length > 0 ? (
+            <ul>
+              {semanticMemories.map((memory) => (
+                <li key={memory.id}>
+                  <strong>{formatProfileLabel(memory.category)}</strong>
+                  <span>{memory.content}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p>None</p>}
+        </UserProfileMemorySection>
+      </div>
+    </section>
+  );
 }
 
 function clampUnit(value: number) {
@@ -169,7 +352,11 @@ function inventoryItemAtPoint(
 }
 
 function capitalizeItemName(name: string) {
-  return name.replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
+  return name.replace(/(^|[\s([{/-])(\p{L})/gu, (_match, prefix: string, letter: string) => `${prefix}${letter.toUpperCase()}`);
+}
+
+function inventoryItemDisplayName(item: InventoryItem) {
+  return capitalizeItemName(item.name);
 }
 
 function normalizeRecipeIngredient(value: string) {
@@ -278,15 +465,27 @@ function recipeIngredientItemMatchRank(ingredient: string, item: InventoryItem) 
 }
 
 export function AgentWorkspace({
+  initialChat,
+  inventoryFinalizationId,
   fridgeId,
   imageId,
   locationImages,
   inventory,
   externalInventory,
+  dietaryRestrictions,
+  dietaryPreferences,
+  activeGoals,
+  semanticMemories,
+  streamedRawDetections = [],
+  streamedStorageLocation = null,
+  transitionRawDetections = [],
+  isInventorySceneLoading,
   uploadStatusByLocation,
   onDeleteImage,
   onInventoryUpdated,
+  onResetUserProfile,
   onUploadImage,
+  onInventoryFinalized,
 }: AgentWorkspaceProps) {
   const [mobilePane, setMobilePane] = useState<"chat" | "inventory">("chat");
   const [location, setLocation] = useState<WorkspaceLocation>("fridge");
@@ -294,11 +493,18 @@ export function AgentWorkspace({
   const [selection, setSelection] = useState<{ itemIds: string[]; source: "agent" | "user" }>({ itemIds: [], source: "agent" });
   const [activities, setActivities] = useState<AgentActivityEvent[]>([]);
   const [placements, setPlacements] = useState<Array<{ itemId: string; zoneId: string }>>([]);
+  const [organizationAnimationId, setOrganizationAnimationId] = useState(0);
   const [draftRequest, setDraftRequest] = useState<DraftRequest | null>(null);
   const [seededItems, setSeededItems] = useState<ConversationContextSeededItem[]>([]);
+  const [seededBoundingBoxes, setSeededBoundingBoxes] = useState<ConversationContext["seededBoundingBoxes"]>([]);
   const [allInventoryCategory, setAllInventoryCategory] = useState<"all" | InventoryItem["cat"]>("all");
   const [allInventoryStorage, setAllInventoryStorage] = useState<AllInventoryStorageFilter>("all");
   const [allInventoryZone, setAllInventoryZone] = useState("all");
+  const [groceryPlan, setGroceryPlan] = useState<GroceryPlan>({ recipes: [], items: [] });
+  const [userProfile, setUserProfile] = useState(() => ({
+    dietaryRestrictions,
+    dietaryPreferences,
+  }));
   const [hoveredItemId, setHoveredItemId] = useState<string | null>(null);
   const [hoveredRecipeItemIds, setHoveredRecipeItemIds] = useState<string[] | null>(null);
   const [isDrawMode, setIsDrawMode] = useState(false);
@@ -308,16 +514,22 @@ export function AgentWorkspace({
   const [seededLabels, setSeededLabels] = useState<Record<string, string>>({});
   const photoRef = useRef<HTMLDivElement | null>(null);
   const photoImageRef = useRef<HTMLImageElement | null>(null);
+  const lastPhotoItemClickRef = useRef<{ key: string; time: number; x: number; y: number } | null>(null);
   const [photoMetrics, setPhotoMetrics] = useState<PhotoMetrics | null>(null);
 
   const visibleExternal = useMemo(() => externalInventory.filter((item) => {
     if (location === "all_inventory") return true;
+    if (!isStorageWorkspaceLocation(location)) return false;
     return item.storageLocation === location;
   }), [externalInventory, location]);
-  const currentImage = location === "all_inventory" ? null : locationImages[location] ?? null;
+  const currentImage = isStorageWorkspaceLocation(location) ? locationImages[location] ?? null : null;
   const imageDataUrls = useMemo(() => Object.fromEntries(
     Object.values(locationImages).map((image) => [image.id, image.dataUrl]),
   ), [locationImages]);
+  const loadingFoods = useMemo(
+    () => loadingFoodEmojis(userProfile.dietaryRestrictions, userProfile.dietaryPreferences),
+    [userProfile],
+  );
   const zoneById = useMemo(() => new Map(inventory.zones.map((zone) => [zone.id, zone])), [inventory.zones]);
   const zoneOptions = useMemo(() => {
     const zones = inventory.zones.filter((zone) => inventory.items.some((item) => item.loc.zoneId === zone.id));
@@ -379,17 +591,24 @@ export function AgentWorkspace({
     return () => observer.disconnect();
   }, [currentImage?.id, updatePhotoMetrics]);
 
+  useEffect(() => {
+    setUserProfile({ dietaryRestrictions, dietaryPreferences });
+  }, [dietaryPreferences, dietaryRestrictions]);
+
   const selectItem = useCallback((itemId: string) => {
+    setSeededBoundingBoxes([]);
     setSelection({ itemIds: [itemId], source: "user" });
     setFocus({ mode: "item", itemIds: [itemId], zoneIds: [], recipeId: null, emphasis: "highlight", reason: null });
   }, []);
 
   const clearSelection = useCallback(() => {
+    setSeededBoundingBoxes([]);
     setSelection({ itemIds: [], source: "user" });
     setFocus(emptyWorkspaceFocus());
   }, []);
 
   const selectZone = useCallback((zoneId: string) => {
+    setSeededBoundingBoxes([]);
     setSelection({ itemIds: [], source: "user" });
     setFocus({ mode: "zone", itemIds: [], zoneIds: [zoneId], recipeId: null, emphasis: "highlight", reason: null });
   }, []);
@@ -453,67 +672,84 @@ export function AgentWorkspace({
     };
   }
 
-  async function seedBoundingBox(boundingBox: NormalizedBoundingBox) {
+  function seedBoundingBox(boundingBox: NormalizedBoundingBox) {
     if (!currentImage) {
       throw new Error(`Cannot seed bounding box because there is no ${location} image selected`);
     }
 
-    setBboxToolStatus("saving");
     setBboxToolError(null);
-
-    try {
-      const response = await fetch("/api/seed-bbox", {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          imageId: currentImage.id,
-          boundingBox,
-        }),
-      });
-      const payload = await response.json() as SeedBoundingBoxResponse | { error?: string };
-
-      if (!response.ok) {
-        throw new Error("error" in payload && payload.error ? payload.error : `Seed bounding box request failed with HTTP ${response.status}`);
-      }
-
-      if (
-        !("cropId" in payload) ||
-        !("item" in payload) ||
-        !("inventory" in payload) ||
-        !("draftText" in payload)
-      ) {
-        throw new Error("Seed bounding box response is missing required inventory context");
-      }
-
-      const seed = {
-        itemId: payload.item.id,
-        imageId: currentImage.id,
-        cropId: payload.cropId,
-        userSeeded: true,
-      } satisfies ConversationContextSeededItem;
-
-      onInventoryUpdated(payload.inventory);
-      setSeededLabels((current) => ({
-        ...current,
-        [payload.cropId]: payload.item.label,
-      }));
-      setSeededItems((current) =>
-        current.some((candidate) => candidate.cropId === seed.cropId)
-          ? current
-          : [...current, seed]
-      );
-      setSelection({ itemIds: [payload.item.id], source: "user" });
-      setFocus({ mode: "item", itemIds: [payload.item.id], zoneIds: [], recipeId: null, emphasis: "highlight", reason: null });
-      setDraftRequest({ id: crypto.randomUUID(), text: payload.draftText });
-    } catch (error) {
-      setBboxToolError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBboxToolStatus("ready");
-    }
+    setBboxToolStatus("ready");
+    const seed = {
+      imageId: currentImage.id,
+      cropId: `user-drawn-bbox:${currentImage.id}:${crypto.randomUUID()}`,
+      boundingBox,
+      userSeeded: true,
+    } satisfies ConversationContext["seededBoundingBoxes"][number];
+    setSeededBoundingBoxes([seed]);
+    setSelection({ itemIds: [], source: "user" });
+    setFocus(emptyWorkspaceFocus());
+    setHoveredItemId(null);
+    setDraftRequest({ id: crypto.randomUUID(), text: "Create inventory item(s) from this selected area." });
   }
+
+  const seedInventoryItem = useCallback((item: InventoryItem) => {
+    if (!currentImage) {
+      throw new Error(`Cannot seed chat context because there is no ${location} image selected`);
+    }
+
+    const observation = item.loc.observations.find((candidate) =>
+      candidate.imageId === currentImage.id
+    );
+
+    if (!observation) {
+      throw new Error(`Cannot seed chat context because item ${item.id} has no observation for image ${currentImage.id}`);
+    }
+
+    const sourceItem = inventory.items.find((candidate) =>
+      candidate.id === item.id &&
+      candidate.loc.observations.some((candidateObservation) =>
+        candidateObservation.imageId === observation.imageId &&
+        candidateObservation.boundingBox.x === observation.boundingBox.x &&
+        candidateObservation.boundingBox.y === observation.boundingBox.y &&
+        candidateObservation.boundingBox.width === observation.boundingBox.width &&
+        candidateObservation.boundingBox.height === observation.boundingBox.height
+      )
+    );
+
+    if (!sourceItem) {
+      throw new Error(`Cannot seed chat context because item ${item.id} could not be matched back to source inventory for image ${currentImage.id}`);
+    }
+
+    const observationIndex = sourceItem.loc.observations.findIndex((candidateObservation) =>
+      candidateObservation.imageId === observation.imageId &&
+      candidateObservation.boundingBox.x === observation.boundingBox.x &&
+      candidateObservation.boundingBox.y === observation.boundingBox.y &&
+      candidateObservation.boundingBox.width === observation.boundingBox.width &&
+      candidateObservation.boundingBox.height === observation.boundingBox.height
+    );
+
+    if (observationIndex < 0) {
+      throw new Error(`Cannot seed chat context because source observation for item ${item.id} was not found for image ${currentImage.id}`);
+    }
+
+    const seed = {
+      itemId: sourceItem.id,
+      imageId: observation.imageId,
+      cropId: inventorySeedCropId({
+        imageId: observation.imageId,
+        itemId: sourceItem.id,
+        observationIndex,
+      }),
+      userSeeded: true,
+    } satisfies ConversationContextSeededItem;
+
+    setSeededItems((current) =>
+      current.some((candidate) => candidate.cropId === seed.cropId)
+        ? current
+        : [...current, seed]
+    );
+    setSeededBoundingBoxes([]);
+  }, [currentImage, inventory.items, location]);
 
   function handlePhotoPointerDown(event: React.PointerEvent<HTMLDivElement>) {
     if (!currentImage || bboxToolStatus === "saving") {
@@ -530,14 +766,47 @@ export function AgentWorkspace({
       const item = inventoryItemAtPoint(shownInventory.items, currentImage.id, point);
 
       if (item) {
+        const observation = item.loc.observations.find((candidate) => candidate.imageId === currentImage.id);
+        const clickKey = observation
+          ? [
+            item.id,
+            observation.imageId,
+            observation.boundingBox.x,
+            observation.boundingBox.y,
+            observation.boundingBox.width,
+            observation.boundingBox.height,
+          ].join(":")
+          : item.id;
+        const now = window.performance.now();
+        const previousClick = lastPhotoItemClickRef.current;
+        const sameItem = previousClick?.key === clickKey;
+        const closeInTime = previousClick ? now - previousClick.time <= 500 : false;
+        const closeInSpace = previousClick
+          ? Math.hypot(previousClick.x - event.clientX, previousClick.y - event.clientY) <= 10
+          : false;
+
+        if (event.detail >= 2 || (sameItem && closeInTime && closeInSpace)) {
+          lastPhotoItemClickRef.current = null;
+          seedInventoryItem(item);
+          return;
+        }
+
+        lastPhotoItemClickRef.current = {
+          key: clickKey,
+          time: now,
+          x: event.clientX,
+          y: event.clientY,
+        };
         selectItem(item.id);
       } else {
+        lastPhotoItemClickRef.current = null;
         clearSelection();
       }
 
       return;
     }
 
+    lastPhotoItemClickRef.current = null;
     event.currentTarget.setPointerCapture(event.pointerId);
     setBboxToolError(null);
     setDrawState({ start: point, current: point });
@@ -601,6 +870,9 @@ export function AgentWorkspace({
   }
 
   function itemObservedInLocation(item: InventoryItem, candidate: StorageImageLocation) {
+    if (item.loc.assignment?.source === "user_confirmed") {
+      return false;
+    }
     const image = locationImages[candidate];
 
     if (!image) {
@@ -619,64 +891,6 @@ export function AgentWorkspace({
 
     return zone.imageIds.includes(image.id);
   }
-
-  const seedInventoryItem = useCallback((item: InventoryItem) => {
-    if (!currentImage) {
-      throw new Error(`Cannot seed chat context because there is no ${location} image selected`);
-    }
-
-    const observation = item.loc.observations.find((candidate) =>
-      candidate.imageId === currentImage.id
-    );
-
-    if (!observation) {
-      throw new Error(`Cannot seed chat context because item ${item.id} has no observation for image ${currentImage.id}`);
-    }
-
-    const sourceItem = inventory.items.find((candidate) =>
-      candidate.id === item.id &&
-      candidate.loc.observations.some((candidateObservation) =>
-        candidateObservation.imageId === observation.imageId &&
-        candidateObservation.boundingBox.x === observation.boundingBox.x &&
-        candidateObservation.boundingBox.y === observation.boundingBox.y &&
-        candidateObservation.boundingBox.width === observation.boundingBox.width &&
-        candidateObservation.boundingBox.height === observation.boundingBox.height
-      )
-    );
-
-    if (!sourceItem) {
-      throw new Error(`Cannot seed chat context because item ${item.id} could not be matched back to source inventory for image ${currentImage.id}`);
-    }
-
-    const observationIndex = sourceItem.loc.observations.findIndex((candidateObservation) =>
-      candidateObservation.imageId === observation.imageId &&
-      candidateObservation.boundingBox.x === observation.boundingBox.x &&
-      candidateObservation.boundingBox.y === observation.boundingBox.y &&
-      candidateObservation.boundingBox.width === observation.boundingBox.width &&
-      candidateObservation.boundingBox.height === observation.boundingBox.height
-    );
-
-    if (observationIndex < 0) {
-      throw new Error(`Cannot seed chat context because source observation for item ${item.id} was not found for image ${currentImage.id}`);
-    }
-
-    const seed = {
-      itemId: sourceItem.id,
-      imageId: observation.imageId,
-      cropId: inventorySeedCropId({
-        imageId: observation.imageId,
-        itemId: sourceItem.id,
-        observationIndex,
-      }),
-      userSeeded: true,
-    } satisfies ConversationContextSeededItem;
-
-    setSeededItems((current) =>
-      current.some((candidate) => candidate.cropId === seed.cropId)
-        ? current
-        : [...current, seed]
-    );
-  }, [currentImage, inventory.items, location]);
 
   function applyAction(action: WorkspaceAction) {
     if (action.type === "show_evidence") {
@@ -702,6 +916,7 @@ export function AgentWorkspace({
     setActivities([]);
     setPlacements([]);
     setSelection({ itemIds: [], source: "agent" });
+    setSeededBoundingBoxes([]);
     setHoveredRecipeItemIds(null);
     setFocus(emptyWorkspaceFocus());
   }
@@ -709,7 +924,7 @@ export function AgentWorkspace({
   function seedItemAction(action: "quantity" | "recipe" | "correct" | "consume") {
     if (!selectedItem) return;
     seedInventoryItem(selectedItem);
-    setDraftRequest({ id: crypto.randomUUID(), text: itemPrompt(selectedItem, action) });
+    setDraftRequest({ id: crypto.randomUUID(), text: itemPrompt(action) });
   }
 
   const conversationContext = {
@@ -717,6 +932,7 @@ export function AgentWorkspace({
     selectedZoneIds: focus.zoneIds,
     selectedRecipeId: focus.recipeId,
     seededItems,
+    seededBoundingBoxes,
   };
   const seededItemLabels = {
     ...Object.fromEntries(
@@ -727,7 +943,7 @@ export function AgentWorkspace({
             itemId: item.id,
             observationIndex,
           }),
-          item.label,
+          inventoryItemDisplayName(item),
         ] as const)
       ),
     ),
@@ -735,7 +951,7 @@ export function AgentWorkspace({
   };
 
   const shownInventory = useMemo(() => {
-    if (location === "all_inventory") {
+    if (!isStorageWorkspaceLocation(location)) {
       return inventory;
     }
 
@@ -773,6 +989,9 @@ export function AgentWorkspace({
     : null;
   const selectedPhotoBox = inventoryObservationBox(selectedItem, currentImage?.id ?? null);
   const hoveredPhotoBox = inventoryObservationBox(hoveredItem, currentImage?.id ?? null);
+  const seededPhotoBox = currentImage
+    ? seededBoundingBoxes.find((box) => box.imageId === currentImage.id)?.boundingBox ?? null
+    : null;
   const drawingPhotoBox = drawState ? normalizedDrawBox(drawState) : null;
   const activeHoverItemIds = hoveredItemId ? [hoveredItemId] : [];
   const focusedItemIds = [...new Set([...focus.itemIds, ...activeHoverItemIds])];
@@ -794,16 +1013,16 @@ export function AgentWorkspace({
         emphasis: "highlight" as const,
         reason: focus.reason,
       }
-    : focus;
+      : focus;
 
-  function locationForObservedItem(item: InventoryItem): WorkspaceLocation {
+  function locationForObservedItem(item: InventoryItem): StorageImageLocation | null {
     for (const candidate of STORAGE_IMAGE_LOCATIONS) {
       if (itemObservedInLocation(item, candidate)) {
         return candidate;
       }
     }
 
-    throw new Error(`Cannot determine storage location for inventory item ${item.id} because none of its observations match the loaded location images`);
+    return null;
   }
 
   function locationLabel(candidate: StorageImageLocation) {
@@ -811,8 +1030,22 @@ export function AgentWorkspace({
   }
 
   function allInventoryLocationLabel(item: InventoryItem) {
-    return locationLabel(locationForObservedItem(item) as StorageImageLocation);
+    const itemLocation = locationForObservedItem(item);
+    return itemLocation ? locationLabel(itemLocation) : "No loaded image match";
   }
+
+  function workspaceLocationLabel(candidate: WorkspaceLocation) {
+    if (candidate === "all_inventory") return "All Inventory";
+    if (candidate === "grocery_list") return "Grocery List";
+    if (candidate === "user_profile") return "User profile";
+    return locationLabel(candidate);
+  }
+
+  const visualWorkspaceClassName = [
+    "agent-workspace-visual",
+    `agent-workspace-pane--${mobilePane}`,
+    location === "grocery_list" || location === "user_profile" ? "agent-workspace-visual--scroll" : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <section className="agent-workspace" aria-label="FridgeFriend agent workspace">
@@ -822,13 +1055,61 @@ export function AgentWorkspace({
       </nav>
       <div className={`agent-workspace-chat agent-workspace-pane--${mobilePane}`}>
         <FridgeQueryChat
+          initialChat={initialChat}
           conversationContext={conversationContext}
+          dietaryPreferences={userProfile.dietaryPreferences}
+          dietaryRestrictions={userProfile.dietaryRestrictions}
           draftRequest={draftRequest}
           fridgeId={fridgeId}
           imageId={imageId}
-          onAgentEvent={(event) => setActivities((current) => [...current.slice(-3), event])}
-          onClearSeededItems={() => setSeededItems([])}
+          onAgentEvent={(event) => {
+            setActivities((current) => [...current.slice(-3), event]);
+
+            if (event.type !== "inventory_assertion_applied") {
+              return;
+            }
+
+            onInventoryUpdated({
+              ...inventory,
+              items: inventory.items.map((item) =>
+                item.id === event.itemId
+                  ? {
+                    ...item,
+                    name: event.label.toLocaleLowerCase(),
+                    label: event.label,
+                    src: [...new Set([...item.src, "user-asserted-label"])],
+                    review: "confirmed",
+                  }
+                  : item
+              ),
+            });
+            setSeededLabels((current) => ({
+              ...current,
+              [event.cropId]: event.label,
+            }));
+          }}
+          onClearSeededItems={() => {
+            setSeededItems([]);
+            setSeededBoundingBoxes([]);
+          }}
           onQueryStarted={onQueryStarted}
+          onGroceryPlan={(plan) => {
+            setGroceryPlan(plan);
+            setLocation("grocery_list");
+          }}
+          onDietaryProfileChange={setUserProfile}
+          inventory={inventory}
+          onAddPantryCompletionItems={(suggestions) => {
+            setGroceryPlan((current) => mergePantryCompletionItems(current, suggestions));
+            setLocation("grocery_list");
+          }}
+          onOpenGroceryList={() => setLocation("grocery_list")}
+          onOrganizationPlanCompleted={(updatedInventory) => {
+            setOrganizationAnimationId((current) => current + 1);
+            onInventoryUpdated(updatedInventory);
+            applyAction({ type: "reset_view" });
+          }}
+          onOrganizationPlanRejected={() => applyAction({ type: "reset_view" })}
           onRecipeIngredientHover={hoverRecipeIngredients}
           onRemoveSeededItem={(cropId) => setSeededItems((current) => current.filter((item) => item.cropId !== cropId))}
           onWorkspaceAction={applyAction}
@@ -836,12 +1117,12 @@ export function AgentWorkspace({
           seededItems={seededItems}
         />
       </div>
-      <section className={`agent-workspace-visual agent-workspace-pane--${mobilePane}`} aria-label="Visual workspace">
+      <section className={visualWorkspaceClassName} aria-label="Visual workspace">
         <header className="visual-workspace-toolbar">
           <div className="workspace-switcher" aria-label="Inventory location">
-            {(["fridge", "freezer", "pantry", "all_inventory"] as const).map((candidate) => (
+            {(["fridge", "freezer", "pantry", "all_inventory", "grocery_list", "user_profile"] as const).map((candidate) => (
               <button className={location === candidate ? "workspace-tab workspace-tab--active" : "workspace-tab"} key={candidate} onClick={() => setLocation(candidate)} type="button">
-                {candidate === "all_inventory" ? "All Inventory" : candidate[0].toUpperCase() + candidate.slice(1)}
+                {workspaceLocationLabel(candidate)}
               </button>
             ))}
           </div>
@@ -858,19 +1139,58 @@ export function AgentWorkspace({
             ) : null}
           </div>
         </header>
-        {location !== "all_inventory" ? (
+        {location === "grocery_list" ? (
+          <div className="grocery-list-workspace">
+            <GroceryPlanArtifact onPlanChange={setGroceryPlan} plan={groceryPlan} />
+          </div>
+        ) : location === "user_profile" ? (
+          <div className="user-profile-workspace">
+            <UserProfileArtifact
+              activeGoals={activeGoals}
+              dietaryPreferences={userProfile.dietaryPreferences}
+              dietaryRestrictions={userProfile.dietaryRestrictions}
+              onReset={() => {
+                setUserProfile({ dietaryRestrictions: [], dietaryPreferences: [] });
+                onResetUserProfile();
+              }}
+              semanticMemories={semanticMemories}
+            />
+          </div>
+        ) : location !== "all_inventory" ? (
           <>
             <p className="workspace-breadcrumb">{locationLabel(location)} overview{focus.zoneIds.length > 0 ? ` › ${focus.zoneIds.join(", ")}` : ""}{selectedItem ? ` › ${selectedItem.label}` : ""}</p>
             <div className="workspace-viewport workspace-viewport--compare">
               <FridgeInventoryCanvas
+                finalizationId={inventoryFinalizationId + organizationAnimationId}
                 imageDataUrls={imageDataUrls}
                 inventory={shownInventory}
+                isLoading={
+                  isInventorySceneLoading &&
+                  streamedStorageLocation === location
+                }
+                loadingIndicator={
+                  <FoodLoadingIndicator
+                    foods={loadingFoods}
+                    label={`Scanning ${location} inventory.`}
+                  />
+                }
                 onClearSelection={clearSelection}
+                onFinalizationComplete={onInventoryFinalized}
                 onHoverItem={hoverItem}
                 onSeedItem={seedInventoryItem}
                 onSelectItem={selectItem}
                 onSelectZone={selectZone}
                 previewPlacements={placements}
+                rawDetections={
+                  streamedStorageLocation === location
+                    ? streamedRawDetections
+                    : []
+                }
+                transitionRawDetections={
+                  streamedStorageLocation === location
+                    ? transitionRawDetections
+                    : []
+                }
                 workspaceFocus={workspaceFocus}
               />
               <div
@@ -947,6 +1267,13 @@ export function AgentWorkspace({
                         style={boxStyle(hoveredPhotoBox)}
                       />
                     ) : null}
+                    {seededPhotoBox && photoMetrics ? (
+                      <span
+                        aria-hidden="true"
+                        className="workspace-photo-box workspace-photo-box--drawing"
+                        style={boxStyle(seededPhotoBox)}
+                      />
+                    ) : null}
                     {drawingPhotoBox && photoMetrics ? (
                       <span
                         aria-hidden="true"
@@ -991,25 +1318,27 @@ export function AgentWorkspace({
               </div>
               {activities.length > 0 ? (
                 <div className="workspace-activity" aria-live="polite">
-                  {activities.map((event, index) => <p key={`${event.type}-${index}`}>{event.type === "enrichment_started" ? `Inspecting ${event.itemId}` : event.type === "enrichment_completed" ? `Updated ${event.itemId}` : event.type === "enrichment_failed" ? event.error : event.question}</p>)}
+                  {activities.map((event, index) => <p key={`${event.type}-${index}`}>{event.type === "enrichment_started" ? `Inspecting ${event.itemId}` : event.type === "enrichment_completed" ? `Updated ${event.itemId}` : event.type === "enrichment_failed" || event.type === "inventory_assertion_failed" ? event.error : event.type === "inventory_assertion_applied" ? `Labeled ${event.itemId} as ${event.label}` : event.question}</p>)}
                 </div>
               ) : null}
             </div>
             <aside className="workspace-inspector" aria-live="polite">
               {selectedItem ? (
                 <>
-                  <div className="workspace-inspector-heading"><h2>{selectedItem.label}</h2></div>
+                  <div className="workspace-inspector-heading"><h2>{inventoryItemDisplayName(selectedItem)}</h2></div>
                   <p>{formatQuantity(selectedItem)}</p>
-                  <p>Observed in {selectedItem.loc.zoneId ?? "an unassigned location"} · {Math.round(selectedItem.conf * 100)}% confidence</p>
+                  <p>Observed in {selectedItem.loc.zoneId ?? "an unassigned location"}
+                    <br />
+                    {Math.round(selectedItem.conf * 100)}% confidence</p>
                   <div className="workspace-item-actions">
                     <button onClick={() => seedItemAction("quantity")} type="button">How much is left?</button>
                     <button onClick={() => seedItemAction("recipe")} type="button">What can I make with this?</button>
                     <button onClick={() => seedItemAction("correct")} type="button">Get more detail about this item</button>
-                    <button onClick={() => seedItemAction("consume")} type="button">I already used this</button>
+                    <button onClick={() => seedItemAction("consume")} type="button">I ran out of this</button>
                   </div>
                 </>
               ) : hoveredItem ? (
-                <div className="workspace-inspector-heading"><h2>{capitalizeItemName(hoveredItem.name)}</h2></div>
+                <div className="workspace-inspector-heading"><h2>{inventoryItemDisplayName(hoveredItem)}</h2></div>
               ) : <p>Select an item to inspect. Double-click to add it to the chat.</p>}
             </aside>
           </>
@@ -1026,7 +1355,7 @@ export function AgentWorkspace({
               <label className="inventory-filter-field">
                 <span>Location</span>
                 <select value={allInventoryStorage} onChange={(event) => setAllInventoryStorage(event.currentTarget.value as AllInventoryStorageFilter)}>
-                  <option value="all">Fridge, pantry, freezer</option>
+                  <option value="all">All locations</option>
                   <option value="fridge">Fridge</option>
                   <option value="pantry">Pantry</option>
                   <option value="freezer">Freezer</option>
@@ -1046,7 +1375,7 @@ export function AgentWorkspace({
               {filteredInventoryItems.map((item) => {
                 const zone = item.loc.zoneId ? zoneById.get(item.loc.zoneId) : null;
                 return (
-                  <button className="reported-inventory-item reported-inventory-item--observed" key={item.id} onClick={() => { selectItem(item.id); setLocation(locationForObservedItem(item)); }} type="button">
+                  <button className="reported-inventory-item reported-inventory-item--observed" key={item.id} onClick={() => { const itemLocation = locationForObservedItem(item); selectItem(item.id); if (itemLocation) setLocation(itemLocation); }} type="button">
                     <span className="reported-inventory-main">
                       <span className="reported-inventory-name">{item.label}</span>
                       <span className="reported-inventory-meta">{CATEGORY_LABELS[item.cat]} · {allInventoryLocationLabel(item)} · {zone?.label ?? "Unassigned zone"}</span>

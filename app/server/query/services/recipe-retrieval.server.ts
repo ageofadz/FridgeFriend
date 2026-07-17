@@ -3,6 +3,7 @@ import {
   normalizeRecipeTag,
   selectUsefulTags,
 } from "../../recipes/normalization";
+import { isUniversalBasicIngredient } from "../../recipes/pantry-basics";
 import type { Recipe, RecipeCandidate } from "../../recipes/types";
 import type {
   DietaryPreferenceMemory,
@@ -38,9 +39,16 @@ export type RankedRecipe = {
   tagScore: number;
   preferenceScore: number;
   ratingScore: number;
+  intentTier?: "primary" | "related" | "coverage";
   eligibilityBand: "strict" | "relaxed";
   score: number;
-  tournamentPlacement?: "winner" | "finalist";
+};
+
+export type RecipeRankingAudit = {
+  hardFilterRejections: number;
+  coverageRankedCandidates: number;
+  tournamentCandidates: number;
+  terminalReason: "ready" | "hard_constraints_rejected" | "coverage_rejected" | "tournament_empty";
 };
 
 export type RecipeRetrievalResult = {
@@ -51,7 +59,10 @@ export type RecipeRetrievalResult = {
   noMatches: boolean;
   exhausted: boolean;
   reason: string | null;
+  audit: RecipeRankingAudit;
 };
+
+export type RecipeCoverageMode = "available_ingredients" | "dish_specific";
 
 const GENERALIZABLE_BASE_INGREDIENTS = new Set([
   "beef", "chicken", "egg", "fish", "pork", "shrimp", "tofu", "turkey",
@@ -86,12 +97,18 @@ function matchesRequestedIngredient(recipeIngredient: string, requestedIngredien
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`, "u").test(normalizedRecipeIngredient);
 }
 
-function requiredRequestedIngredients(search: RecipeSearchRequest) {
-  if (search.useAvailableIngredients) {
+function requestedIngredientSignals(search: RecipeSearchRequest) {
+  return [...new Set(search.preferredIngredients.map(normalizeIngredientName).filter(Boolean))];
+}
+
+function requestedIngredientMatches(recipeIngredients: string[], requestedIngredients: string[]) {
+  if (requestedIngredients.length === 0) {
     return [];
   }
 
-  return [...new Set(search.preferredIngredients.map(normalizeIngredientName).filter(Boolean))];
+  return recipeIngredients.filter((ingredient) =>
+    requestedIngredients.some((requested) => matchesRequestedIngredient(ingredient, requested))
+  );
 }
 
 function normalizedIngredientVariants(ingredient: AvailableRecipeIngredient) {
@@ -123,6 +140,13 @@ function matchesAvailableIngredient(recipeIngredient: string, availableIngredien
     }));
 }
 
+export function recipeIngredientIsAvailable(
+  recipeIngredient: string,
+  availableIngredients: AvailableRecipeIngredient[],
+) {
+  return matchesAvailableIngredient(recipeIngredient, availableIngredients);
+}
+
 function recipeTags(recipe: Recipe) {
   return recipe.tags.map(normalizeRecipeTag).filter(Boolean);
 }
@@ -140,16 +164,12 @@ function violatesHardConstraints(
   const ingredients = recipe.ingredients.map((ingredient) => ingredient.canonicalName);
   const tags = recipeTags(recipe);
   const restrictions = [...search.dietaryRestrictions, ...dietaryRestrictions.map((restriction) => restriction.subject)];
-  const requestedIngredients = requiredRequestedIngredients(search);
 
   if (search.maxMinutes !== null && recipe.minutes > search.maxMinutes ||
     search.maxCalories !== null && (recipe.nutrition.calories === null || recipe.nutrition.calories > search.maxCalories) ||
     search.minProteinDailyValue !== null &&
       (recipe.nutrition.proteinDailyValue === null || recipe.nutrition.proteinDailyValue < search.minProteinDailyValue) ||
     search.excludedIngredients.some((excluded) => hasTerm(ingredients, excluded)) ||
-    requestedIngredients.some((requested) =>
-      !ingredients.some((ingredient) => matchesRequestedIngredient(ingredient, requested))
-    ) ||
     search.requiredTags.some((tag) => !tags.includes(tag)) ||
     search.excludedTags.some((tag) => tags.includes(tag))) {
     return true;
@@ -204,33 +224,29 @@ function badges(tags: string[], _matchedIngredients: string[], search: RecipeSea
   return tagBadges.slice(0, 3);
 }
 
+export function recipeCoverageMode(search: RecipeSearchRequest): RecipeCoverageMode {
+  if (!search.intent) {
+    return search.useAvailableIngredients ? "available_ingredients" : "dish_specific";
+  }
+
+  return search.intent.specific ? "dish_specific" : "available_ingredients";
+}
+
+function intentTierRank(tier: RankedRecipe["intentTier"]) {
+  if (tier === "primary") return 0;
+  if (tier === "related") return 1;
+  return 2;
+}
+
 function eligibilityBand(input: {
-  useAvailableIngredients: boolean;
+  coverageMode: RecipeCoverageMode;
   matchedIngredients: string[];
-  missingIngredients: string[];
-  ingredientCoverage: number;
 }): "strict" | "relaxed" | null {
-  if (!input.useAvailableIngredients) {
+  if (input.coverageMode === "dish_specific") {
     return "strict";
   }
 
-  if (input.matchedIngredients.length >= 3 && input.ingredientCoverage >= 0.4) {
-    return "strict";
-  }
-
-  if (input.matchedIngredients.length >= 2 && input.ingredientCoverage >= 0.5) {
-    return "strict";
-  }
-
-  if (input.matchedIngredients.length >= 3 && input.ingredientCoverage >= 1 / 3) {
-    return "relaxed";
-  }
-
-  if (input.matchedIngredients.length >= 2 && input.ingredientCoverage >= 0.4) {
-    return "relaxed";
-  }
-
-  return null;
+  return input.matchedIngredients.length > 0 ? "strict" : null;
 }
 
 function ingredientSimilarity(left: RankedRecipe, right: RankedRecipe) {
@@ -258,7 +274,7 @@ function nameSimilarity(left: RankedRecipe, right: RankedRecipe) {
   return intersection / Math.max(1, new Set([...leftWords, ...rightWords]).size);
 }
 
-export function diversifyRecipes(recipes: RankedRecipe[], limit = 5, initial: RankedRecipe[] = []) {
+function diversifyRecipes(recipes: RankedRecipe[], limit = 5, initial: RankedRecipe[] = []) {
   const remaining = [...recipes];
   const selected = [...initial];
   const result: RankedRecipe[] = [];
@@ -287,6 +303,18 @@ export function diversifyRecipes(recipes: RankedRecipe[], limit = 5, initial: Ra
   return result;
 }
 
+function diversifyRecipesByIntentTier(recipes: RankedRecipe[], limit: number, initial: RankedRecipe[] = []) {
+  const selected: RankedRecipe[] = [];
+
+  for (const tier of ["primary", "related", "coverage"] as const) {
+    if (selected.length === limit) break;
+    const tierRecipes = recipes.filter((recipe) => (recipe.intentTier ?? "coverage") === tier);
+    selected.push(...diversifyRecipes(tierRecipes, limit - selected.length, [...initial, ...selected]));
+  }
+
+  return selected;
+}
+
 export function rankRecipeCandidates(input: {
   candidates: RecipeCandidate[];
   recipes: Recipe[];
@@ -297,11 +325,17 @@ export function rankRecipeCandidates(input: {
   activeGoals?: GoalMemory[];
   excludedRecipeIds?: string[];
   limit?: number;
+  minimumPrimaryIntentResults?: number;
+  minMissingIngredients?: number;
+  maxMissingIngredients?: number;
+  excludeUniversalBasics?: boolean;
   now?: Date;
 }): RecipeRetrievalResult {
   const candidateById = new Map(input.candidates.map((candidate) => [candidate.recipeId, candidate]));
   const availableIngredients = input.availableIngredients.filter((ingredient) => normalizeIngredientName(ingredient.name));
   const availableNames = availableIngredients.map((ingredient) => normalizeIngredientName(ingredient.name));
+  const coverageMode = recipeCoverageMode(input.search);
+  const requestedIngredients = requestedIngredientSignals(input.search);
   const now = input.now ?? new Date();
   const ingredientWasteScores = new Map<string, number>();
   for (const ingredient of availableIngredients) {
@@ -314,28 +348,46 @@ export function rankRecipeCandidates(input: {
   const totalWasteScore = [...new Set(availableIngredients.flatMap(normalizedIngredientVariants))]
     .reduce((sum, name) => sum + (ingredientWasteScores.get(name) ?? 0), 0);
   const excludedRecipeIds = new Set(input.excludedRecipeIds ?? []);
-  const ranked = input.recipes.flatMap((recipe) => {
+  let hardFilterRejections = 0;
+  let coverageRejections = 0;
+  const ranked: RankedRecipe[] = [];
+  for (const recipe of input.recipes) {
     const candidate = candidateById.get(recipe.id);
     if (!candidate || excludedRecipeIds.has(recipe.id) || violatesHardConstraints(recipe, input.search, input.dietaryRestrictions)) {
-      return [];
+      hardFilterRejections += 1;
+      continue;
     }
     const ingredients = [...new Set(recipe.ingredients.map((ingredient) => normalizeIngredientName(ingredient.canonicalName)).filter(Boolean))];
     const matchedIngredients = ingredients.filter((ingredient) => matchesAvailableIngredient(ingredient, availableIngredients));
-    const missingIngredients = ingredients.filter((ingredient) => !matchesAvailableIngredient(ingredient, availableIngredients));
+    const matchedRequestedIngredients = requestedIngredientMatches(ingredients, requestedIngredients);
+    const missingIngredients = ingredients
+      .filter((ingredient) => !matchesAvailableIngredient(ingredient, availableIngredients))
+      .filter((ingredient) => !input.excludeUniversalBasics || !isUniversalBasicIngredient(ingredient));
+    if (
+      input.minMissingIngredients !== undefined && missingIngredients.length < input.minMissingIngredients ||
+      input.maxMissingIngredients !== undefined && missingIngredients.length > input.maxMissingIngredients
+    ) {
+      coverageRejections += 1;
+      continue;
+    }
     const ingredientCoverage = ingredients.length === 0 ? 0 : matchedIngredients.length / ingredients.length;
-    const band = eligibilityBand({
-      useAvailableIngredients: input.search.useAvailableIngredients,
-      matchedIngredients,
-      missingIngredients,
-      ingredientCoverage,
-    });
+    const band = input.minMissingIngredients !== undefined
+      ? matchedIngredients.length > 0 ? "strict" : null
+      : eligibilityBand({
+        coverageMode,
+        matchedIngredients,
+      });
     if (!band) {
-      return [];
+      coverageRejections += 1;
+      continue;
     }
     const tags = recipeTags(recipe);
     const semanticScore = clamp(candidate.semanticScore);
     const tagScore = clamp(candidate.tagScore ?? 0);
     const ingredientScore = clamp(candidate.ingredientScore ?? 0);
+    const requestedIngredientScore = requestedIngredients.length === 0
+      ? 0
+      : matchedRequestedIngredients.length / requestedIngredients.length;
     const preferenceScore = clamp(tagPreferenceScore(tags, input.search) * 0.75 +
       durablePreferenceScore(recipe, input.dietaryPreferences ?? [], input.activeGoals ?? []) * 0.25);
     const usesSoonIngredients = matchedIngredients.filter((ingredient) => (ingredientWasteScores.get(ingredient) ?? 0) > 0);
@@ -345,35 +397,64 @@ export function rankRecipeCandidates(input: {
     const ratingScore = recipe.rating ? clamp(recipe.rating.average / 5) : 0;
     const score = semanticScore * 0.2 + tagScore * 0.22 + ingredientScore * 0.18 +
       ingredientCoverage * 0.18 + wasteReductionScore * 0.16 + preferenceScore * 0.07 +
-      ratingScore * 0.03 - missingIngredients.length * 0.03;
-    return [{
+      ratingScore * 0.03 + requestedIngredientScore * 0.08 - missingIngredients.length * 0.03;
+    ranked.push({
       id: recipe.id, name: recipe.name, description: recipe.description, minutes: recipe.minutes,
       calories: recipe.nutrition.calories, proteinDailyValue: recipe.nutrition.proteinDailyValue,
       ingredients, matchedIngredients, missingIngredients,
       matchedTags: [...new Set([...(candidate.matchedTags ?? []), ...selectUsefulTags(tags)])].sort(),
       matchBadges: badges(tags, matchedIngredients, input.search),
       ingredientCoverage, expiringCoverage, wasteReductionScore, usesSoonIngredients, semanticScore, tagScore, preferenceScore, ratingScore,
-      eligibilityBand: band, score,
-    } satisfies RankedRecipe];
-  }).sort((left, right) => right.score - left.score || right.ingredientCoverage - left.ingredientCoverage || left.id.localeCompare(right.id));
+      eligibilityBand: band, score, intentTier: candidate.intentTier,
+    } satisfies RankedRecipe);
+  }
+  ranked.sort((left, right) =>
+    intentTierRank(left.intentTier) - intentTierRank(right.intentTier) ||
+    right.score - left.score ||
+    right.ingredientCoverage - left.ingredientCoverage ||
+    left.id.localeCompare(right.id));
   const limit = input.limit ?? 5;
-  const strict = ranked.filter((recipe) => recipe.eligibilityBand === "strict");
-  const selectedStrict = diversifyRecipes(strict, limit);
-  const relaxed = ranked.filter((recipe) => recipe.eligibilityBand === "relaxed");
+  const minimumPrimaryIntentResults = input.minimumPrimaryIntentResults ?? 1;
+  const primary = ranked.filter((recipe) => recipe.intentTier === "primary");
+  const intentEligible = input.search.intent?.specific
+    ? primary.length >= minimumPrimaryIntentResults
+      ? primary
+      : ranked.filter((recipe) => recipe.intentTier === "primary" || recipe.intentTier === "related")
+    : ranked;
+  const strict = intentEligible.filter((recipe) => recipe.eligibilityBand === "strict");
+  const selectedStrict = diversifyRecipesByIntentTier(strict, limit);
+  const relaxed = intentEligible.filter((recipe) => recipe.eligibilityBand === "relaxed");
   const recipes = [
     ...selectedStrict,
-    ...diversifyRecipes(relaxed, Math.max(0, limit - selectedStrict.length), selectedStrict),
+    ...diversifyRecipesByIntentTier(relaxed, Math.max(0, limit - selectedStrict.length), selectedStrict),
   ];
   const exhausted = recipes.length < limit;
+  const terminalReason = recipes.length > 0
+    ? "ready"
+    : hardFilterRejections > 0 && ranked.length === 0
+      ? "hard_constraints_rejected"
+      : coverageRejections > 0
+        ? "coverage_rejected"
+        : "tournament_empty";
 
   return {
     source: "food_com", inputIngredients: availableNames, semanticQuery: input.search.semanticQuery, recipes,
     noMatches: recipes.length === 0,
     exhausted,
     reason: recipes.length === 0
-      ? "No local Food.com recipes met the search and hard constraints."
+      ? terminalReason === "hard_constraints_rejected"
+        ? "Retrieved recipes did not satisfy the requested hard constraints."
+        : terminalReason === "coverage_rejected"
+          ? "Retrieved recipes did not use a verified available ingredient."
+          : "Recipe retrieval returned no tournament candidates for the current search constraints."
       : exhausted
         ? "These are the remaining matches for this search."
         : null,
+    audit: {
+      hardFilterRejections,
+      coverageRankedCandidates: ranked.length,
+      tournamentCandidates: recipes.length,
+      terminalReason,
+    },
   };
 }

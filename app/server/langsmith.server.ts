@@ -1,31 +1,49 @@
-import { requiredEnv } from "./env.server";
+const REQUIRED_LANGSMITH_KEYS = ["LANGSMITH_ENDPOINT", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT"] as const;
 
-const REQUIRED_LANGSMITH_KEYS = [
-  "LANGSMITH_API_KEY",
-  "LANGSMITH_TRACING",
-  "LANGSMITH_PROJECT",
-  "LANGSMITH_PROMPT_ENVIRONMENT",
-  "LANGSMITH_ENDPOINT",
-] as const;
+type LangSmithConfig = {
+  apiKey: string;
+  endpoint: string;
+  project: string;
+};
 
 export function getLangSmithConfig() {
-  return {
-    apiKey: requiredEnv(REQUIRED_LANGSMITH_KEYS[0]),
-    tracing: requiredEnv(REQUIRED_LANGSMITH_KEYS[1]),
-    project: requiredEnv(REQUIRED_LANGSMITH_KEYS[2]),
-    promptEnvironment: requiredEnv(REQUIRED_LANGSMITH_KEYS[3]),
-    endpoint: requiredEnv(REQUIRED_LANGSMITH_KEYS[4]),
-  };
-}
+  const values = Object.fromEntries(
+    REQUIRED_LANGSMITH_KEYS.map((key) => [key, process.env[key]?.trim() ?? ""]),
+  ) as Record<(typeof REQUIRED_LANGSMITH_KEYS)[number], string>;
+  const supplied = REQUIRED_LANGSMITH_KEYS.filter((key) => values[key].length > 0);
 
-export function assertLangSmithTracingEnabled() {
-  const config = getLangSmithConfig();
+  if (supplied.length === 0) {
+    return null;
+  }
 
-  if (config.tracing !== "true") {
+  const missing = REQUIRED_LANGSMITH_KEYS.filter((key) => values[key].length === 0);
+
+  if (missing.length > 0) {
     throw new Error(
-      `LANGSMITH_TRACING must be true to trace scan graph runs; received ${config.tracing}`,
+      `LangSmith configuration is incomplete: ${missing.join(", ")} must be set when using ${supplied.join(", ")}`,
     );
   }
 
-  return config;
+  return {
+    apiKey: values.LANGSMITH_API_KEY,
+    endpoint: values.LANGSMITH_ENDPOINT,
+    project: values.LANGSMITH_PROJECT,
+  } satisfies LangSmithConfig;
 }
+
+export function ensureLangSmithTracingEnv() {
+  let config: LangSmithConfig | null;
+
+  try {
+    config = getLangSmithConfig();
+  } catch {
+    // Incomplete configuration is surfaced to callers of getLangSmithConfig.
+    return;
+  }
+
+  if (config && !process.env.LANGSMITH_TRACING?.trim()) {
+    process.env.LANGSMITH_TRACING = "true";
+  }
+}
+
+ensureLangSmithTracingEnv();

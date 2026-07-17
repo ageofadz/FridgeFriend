@@ -1,13 +1,26 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-
-import { VISION_MODEL } from "../../scan/schemas/inventory";
+import { promptMessages } from "../../scan/services/prompt-messages.server";
 import type { QueryGraphDependencies } from "../schemas/query";
 import {
   IntentResponseProviderSchema,
   IntentResponseSchema,
+  type EnrichmentRequirement,
 } from "../schemas/query";
-import { createQueryModel } from "../services/query-model.server";
+import { conversationContextFromState } from "../services/conversation-context.server";
+import {
+  CHAT_PROVIDER,
+  createIntentRoutingModel,
+  GENERAL_MODEL,
+  INTENT_ROUTING_TIMEOUT_MS,
+} from "../services/query-model.server";
 import type { FridgeQueryStateValue } from "../state";
+
+const SELECTED_DETAIL_ENRICHMENT_FIELDS = [
+  "identity",
+  "quantity",
+  "fill_level",
+  "opened",
+  "expiration_date",
+] as const;
 
 function selectedRecipeIdFromContext(context: FridgeQueryStateValue["context"]) {
   const value = context.conversationContext;
@@ -24,18 +37,41 @@ function selectedRecipeIdFromContext(context: FridgeQueryStateValue["context"]) 
   return null;
 }
 
-function intentRoutingMessages(state: FridgeQueryStateValue, query: string) {
+function selectedItemDetailEnrichment(state: FridgeQueryStateValue, query: string): EnrichmentRequirement | null {
+  const normalizedQuery = query.toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (
+    normalizedQuery !== "get more detail about this." &&
+    normalizedQuery !== "get more detail about this"
+  ) {
+    return null;
+  }
+
+  const seededItems = conversationContextFromState(state).seededItems;
+
+  if (seededItems.length === 0) {
+    return null;
+  }
+
+  return {
+    itemNames: [...new Set(seededItems.map((item) => item.itemId))],
+    fields: [...SELECTED_DETAIL_ENRICHMENT_FIELDS],
+  };
+}
+
+function seededBoundingBoxCount(state: FridgeQueryStateValue) {
+  return conversationContextFromState(state).seededBoundingBoxes.length;
+}
+
+async function intentRoutingMessages(state: FridgeQueryStateValue, query: string, deps: QueryGraphDependencies) {
   const priorRecipeSearch = state.recipeSearchSession
     ? {
       semanticQuery: state.recipeSearchSession.profile.semanticQuery,
       useAvailableIngredients: state.recipeSearchSession.profile.useAvailableIngredients,
       shownRecipeCount: state.recipeSearchSession.shownRecipeIds.length,
-      exhausted: Boolean(
-        typeof state.context.recipeRetrieval === "object" &&
-        state.context.recipeRetrieval !== null &&
-        "exhausted" in state.context.recipeRetrieval &&
-        state.context.recipeRetrieval.exhausted,
-      ),
+      // recipeSearchExhausted persists across turns via the checkpointer, unlike
+      // context.recipeRetrieval, which is rebuilt from scratch every turn.
+      exhausted: state.recipeSearchExhausted,
     }
     : null;
   const routingContext = {
@@ -48,27 +84,12 @@ function intentRoutingMessages(state: FridgeQueryStateValue, query: string) {
       }
       : null,
     selectedRecipeId: selectedRecipeIdFromContext(state.context),
+    seededBoundingBoxCount: seededBoundingBoxCount(state),
   };
 
-  return [
-    new SystemMessage(
-      [
-        "Route a FridgeFriend request to exactly one intent.",
-        "inventory: current recorded food inventory, quantities, locations, or visible item facts.",
-        "expiry: requests to use food before it expires, reduce food waste, identify what to use soon, or plan meals around freshness.",
-        "recipe: cooking ideas, meal planning, recipe recommendations, recipe details, or additional options from a previous recipe result set.",
-        "shopping: groceries, restocking, replacements, missing ingredients, or buy lists.",
-        "space: physical storage fit, shelf capacity, placement, or organization.",
-        "food_knowledge: safety, freshness, nutrition, allergens, or general food facts when the user is not asking for recipes.",
-        "clarification: empty, incoherent, or genuinely ambiguous requests.",
-        "Set recipeContinuation to true only when a prior recipe search exists and the request asks for more, other options, alternatives, similar choices, or continuation from the current recipe results.",
-        "Use priorRecipeSearch, lastRecipeSearch, and selectedRecipeId as conversation state. When recipeContinuation is true, choose recipe even if the message mentions a list or current items.",
-        "Do not choose inventory merely because a recipe continuation refers to the current list, previous results, or available ingredients.",
-        "Set enrichment.itemNames and enrichment.fields only when a missing inventory detail could materially change the answer. Fields are identity, quantity, fill_level, expiration_date, and opened. Leave both arrays empty when the coarse inventory is sufficient.",
-      ].join("\n"),
-    ),
-    new HumanMessage(JSON.stringify(routingContext)),
-  ];
+  const loadedPrompt = deps.promptBundle?.intentRouting;
+  if (!loadedPrompt) throw new Error("Intent routing prompt is unavailable.");
+  return promptMessages(loadedPrompt, { intent_routing_context_json: JSON.stringify(routingContext) });
 }
 
 export function createDetermineIntentNode(deps: QueryGraphDependencies) {
@@ -81,22 +102,46 @@ export function createDetermineIntentNode(deps: QueryGraphDependencies) {
       };
     }
 
-    const model = deps.intentModel ?? createQueryModel();
+    if (state.context.recipeContinuationRequested === true && state.recipeSearchSession) {
+      return {
+        intent: "recipe" as const,
+        context: {
+          ...state.context,
+          intentRouting: {
+            recipeContinuation: true,
+            shoppingMode: "direct",
+            enrichment: { itemNames: [], fields: [] },
+            memoryUpdateRequested: false,
+          },
+        },
+      };
+    }
+
+    const model = deps.intentModel ?? createIntentRoutingModel();
     const structuredModel = model.withStructuredOutput(IntentResponseProviderSchema, {
       name: "FridgeQueryIntent",
     });
-    const result = await structuredModel.invoke(
-      intentRoutingMessages(state, query),
-      {
-        tags: ["query", "determine_intent"],
-        metadata: {
-          userId: state.userId,
-          fridgeId: state.fridgeId,
-          imageId: state.imageId,
-          model: VISION_MODEL,
+    let result: unknown;
+
+    try {
+      result = await structuredModel.invoke(
+        await intentRoutingMessages(state, query, deps),
+        {
+          tags: ["query", "determine_intent"],
+          metadata: {
+            userId: state.userId,
+            fridgeId: state.fridgeId,
+            imageId: state.imageId,
+            provider: CHAT_PROVIDER,
+            model: GENERAL_MODEL,
+          },
+          timeout: INTENT_ROUTING_TIMEOUT_MS,
         },
-      },
-    );
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Intent routing failed for query "${query}" after ${INTENT_ROUTING_TIMEOUT_MS}ms: ${message}`);
+    }
     const parsed = IntentResponseSchema.safeParse(result);
 
     if (!parsed.success) {
@@ -109,13 +154,17 @@ export function createDetermineIntentNode(deps: QueryGraphDependencies) {
       };
     }
 
+    const selectedDetailEnrichment = selectedItemDetailEnrichment(state, query);
+
     return {
-      intent: parsed.data.intent,
+      intent: selectedDetailEnrichment ? "inventory" as const : parsed.data.intent,
       context: {
         ...state.context,
         intentRouting: {
           recipeContinuation: parsed.data.recipeContinuation,
-          enrichment: parsed.data.enrichment,
+          shoppingMode: parsed.data.shoppingMode,
+          enrichment: selectedDetailEnrichment ?? parsed.data.enrichment,
+          memoryUpdateRequested: parsed.data.memoryUpdateRequested,
         },
       },
     };

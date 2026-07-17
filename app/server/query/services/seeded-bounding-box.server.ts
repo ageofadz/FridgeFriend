@@ -1,8 +1,11 @@
-import { HumanMessage } from "@langchain/core/messages";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { getFridgeImage } from "../../images.server";
+import {
+  CHAT_VISION_PROVIDER as CHAT_PROVIDER,
+  CHAT_VISION_MODEL as VISION_MODEL,
+} from "../../ai/chat-model.server";
 import {
   getFridgeInventoryForImage,
   saveFridgeInventory,
@@ -13,9 +16,10 @@ import {
   type Inventory,
   type InventoryItem,
   type NormalizedBoundingBox,
-  VISION_MODEL,
 } from "../../scan/schemas/inventory";
 import { createVisionModel } from "../../scan/services/vision-model.server";
+import { promptMessages } from "../../scan/services/prompt-messages.server";
+import { loadPromptBundle } from "../../prompts/registry.server";
 import { inventorySeedCropId } from "../../../workspace/contracts";
 import { cropImageBoundingBoxDataUrl } from "./focused-visual-context.server";
 
@@ -78,7 +82,7 @@ const SeededBoxIdentificationSchema = z.object({
 
 type SeededBoxIdentification = z.infer<typeof SeededBoxIdentificationSchema>;
 
-export type SeededBoundingBoxResult = {
+type SeededBoundingBoxResult = {
   status: "known_item" | "created_item";
   cropId: string;
   item: InventoryItem;
@@ -226,6 +230,7 @@ async function identifySeededBoxWithVision(input: {
   cropDataUrl: string;
 }) {
   const model = createVisionModel();
+  const loadedPrompt = (await loadPromptBundle()).seededBoundingBoxIdentification;
   const structuredModel = model.withStructuredOutput<SeededBoxIdentification>(
     SeededBoxIdentificationSchema,
     {
@@ -233,34 +238,18 @@ async function identifySeededBoxWithVision(input: {
     },
   );
   const response = await structuredModel.invoke(
-    [
-      new HumanMessage([
-        {
-          type: "text",
-          text: JSON.stringify({
-            task: "Identify the single visible household food-storage inventory object in this user-selected crop.",
-            imageId: input.imageId,
-            boundingBox: input.boundingBox,
-            instructions: [
-              "Return only what is visually supported by the selected crop.",
-              "Use a generic but specific label when the product identity is unclear.",
-              "Do not infer hidden quantity, expiration, brand, or opened state from context outside the crop.",
-            ],
-          }),
-        },
-        {
-          type: "image_url",
-          image_url: {
-            url: input.cropDataUrl,
-          },
-        },
-      ]),
-    ],
+    await promptMessages(loadedPrompt, {
+      seeded_bounding_box_context_json: JSON.stringify({ imageId: input.imageId, boundingBox: input.boundingBox }),
+      image_data_url: input.cropDataUrl,
+    }),
     {
       tags: ["query", "seed_bounding_box"],
       metadata: {
         imageId: input.imageId,
+        provider: CHAT_PROVIDER,
         model: VISION_MODEL,
+        langsmithPromptName: loadedPrompt.name,
+        langsmithPromptRef: loadedPrompt.ref,
       },
     },
   );

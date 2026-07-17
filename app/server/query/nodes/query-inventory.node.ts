@@ -1,6 +1,6 @@
 import { createManageHouseholdInventoryTool } from "../../memory/inventory-tool.server";
-import { ConversationContextSchema } from "../../../workspace/contracts";
 import type { QueryGraphDependencies } from "../schemas/query";
+import { conversationContextFromState } from "../services/conversation-context.server";
 import { loadInventoryContext } from "../services/inventory-context.server";
 import type { FridgeQueryStateValue } from "../state";
 
@@ -74,14 +74,7 @@ function focusedInventoryItemIds(
 }
 
 function seededInventoryItemIds(state: FridgeQueryStateValue) {
-  return ConversationContextSchema.catch({
-    selectedItemIds: [],
-    selectedZoneIds: [],
-    selectedRecipeId: null,
-    seededItems: [],
-  })
-    .parse(state.context.conversationContext)
-    .seededItems.map((item) => item.itemId);
+  return conversationContextFromState(state).seededItems.map((item) => item.itemId);
 }
 
 function selectedZoneItemIds(
@@ -89,12 +82,7 @@ function selectedZoneItemIds(
   state: FridgeQueryStateValue,
 ) {
   if (!inventory) return [];
-  const selectedZoneIds = ConversationContextSchema.catch({
-    selectedItemIds: [],
-    selectedZoneIds: [],
-    selectedRecipeId: null,
-    seededItems: [],
-  }).parse(state.context.conversationContext).selectedZoneIds;
+  const selectedZoneIds = conversationContextFromState(state).selectedZoneIds;
   if (selectedZoneIds.length === 0) return [];
   const zoneIds = new Set(selectedZoneIds);
   return inventory.items
@@ -152,10 +140,11 @@ export function createQueryInventoryNode(deps: QueryGraphDependencies = {}) {
         queryMode: "inventory",
         inventoryQuery: {
           source: "current_inventory_tool",
-          scannedInventory: inventory,
+          scannedInventoryId: inventory?.id ?? null,
           householdInventory: householdInventory.items,
           focusedItemIds,
           visibleItemCount: inventory?.items.length ?? 0,
+          visibleZoneCount: inventory?.zones.length ?? 0,
           householdItemCount: householdInventory.items.length,
           householdInventoryStatus: householdInventory.status,
         },

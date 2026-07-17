@@ -1,5 +1,6 @@
 export {
   createQueryGraph,
+  continueQueryForFridgeThread,
   resumeQueryForFridgeImage,
   FridgeQueryState,
   runQueryForFridgeImage,

@@ -1,17 +1,26 @@
 import { AIMessage } from "@langchain/core/messages";
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 
-import { requiredEnv } from "../../env.server";
-import { VISION_MODEL } from "../../scan/schemas/inventory";
+import {
+  CHAT_MODEL as GENERAL_MODEL,
+  CHAT_PROVIDER,
+  createChatModel,
+} from "../../ai/chat-model.server";
 
-export function createQueryModel() {
-  return new ChatGoogleGenerativeAI({
-    model: VISION_MODEL,
-    temperature: 0,
-    maxRetries: 0,
-    apiKey: requiredEnv("GOOGLE_API_KEY"),
-    streaming: true,
+export {
+  CHAT_MODEL as GENERAL_MODEL,
+  CHAT_PROVIDER,
+} from "../../ai/chat-model.server";
+export const INTENT_ROUTING_TIMEOUT_MS = 10_000;
+
+export function createQueryModel(streaming = false) {
+  return createChatModel({
+    model: GENERAL_MODEL,
+    streaming,
   });
+}
+
+export function createIntentRoutingModel() {
+  return createQueryModel(false);
 }
 
 export function extractMessageText(message: unknown) {

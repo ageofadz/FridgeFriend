@@ -7,7 +7,7 @@ import { createQueryModel } from "../app/server/query/services/query-model.serve
 
 config({ quiet: true });
 
-const datasetName = "fridgefriend-recipe-tournament-rag-evals";
+const datasetName = "fridgefriend-recipe-provenance-rag-evals-v3";
 const fridgeId = requiredEnv("RAG_EVAL_FRIDGE_ID");
 const imageId = requiredEnv("RAG_EVAL_IMAGE_ID");
 const client = new Client({
@@ -33,28 +33,34 @@ function requiredEnv(name: string) {
 async function seedDataset() {
   if (await client.hasDataset({ datasetName })) return;
   const dataset = await client.createDataset(datasetName, {
-    description: "Food.com tournament retrieval quality, faithfulness, and relevance evaluations",
+    description: "Recipe retrieval provenance, faithfulness, and relevance evaluations",
   });
   await client.createExamples({
     datasetId: dataset.id,
     inputs: [
+      { fridgeId, imageId, query: "What can I make from the ingredients in my fridge?" },
       { fridgeId, imageId, query: "Suggest a quick dinner from my available ingredients." },
-      { fridgeId, imageId, query: "What is a high-protein meal I can make from my fridge?" },
-      { fridgeId, imageId, query: "Give me a fast recipe that avoids ingredients I dislike." },
+      { fridgeId, imageId, query: "I prefer spicy food. What can I make from my fridge?" },
+      { fridgeId, imageId, query: "Give me a dairy-free recipe that takes no more than 30 minutes." },
     ],
     outputs: [
-      { expectedTopics: ["dinner"], expectedTags: [] },
-      { expectedTopics: ["protein"], expectedTags: ["high protein"] },
-      { expectedTopics: ["fast"], expectedTags: [] },
+      { requireTournamentCandidates: true },
+      { requireTournamentCandidates: true },
+      { requireTournamentCandidates: true },
+      { requireTournamentCandidates: true },
     ],
   });
 }
 
 async function target(input: { fridgeId: string; imageId: string; query: string }) {
-  let final: { answer: string; recipes: Array<{ name: string; matchedTags: string[]; matchedIngredients: string[]; missingIngredients: string[]; tournamentPlacement?: string }> } | null = null;
+  let final: {
+    answer: string;
+    recipes: Array<{ name: string; matchedTags: string[]; matchedIngredients: string[]; missingIngredients: string[] }>;
+    retrievalAudit?: Record<string, unknown>;
+  } | null = null;
   for await (const event of streamQueryForFridgeImage(input)) {
     if (event.type === "final") {
-      final = { answer: event.answer, recipes: event.recipes };
+      final = { answer: event.answer, recipes: event.recipes, retrievalAudit: event.retrievalAudit };
     }
   }
   if (!final) throw new Error("Recipe RAG evaluation graph completed without a final response");
@@ -83,14 +89,16 @@ const results = await evaluate(target, {
   maxConcurrency: 3,
   evaluators: [
     ({ outputs, referenceOutputs }: EvaluationArgs) => {
-      const expectedTags = Array.isArray(referenceOutputs?.expectedTags) ? referenceOutputs.expectedTags.filter((tag): tag is string => typeof tag === "string") : [];
-      const expectedTopics = Array.isArray(referenceOutputs?.expectedTopics) ? referenceOutputs.expectedTopics.filter((topic): topic is string => typeof topic === "string") : [];
-      const cards = recipeCards(outputs);
-      const evidence = cards.flatMap((recipe) => [recipe.name, ...recipe.matchedTags]).join(" ").toLowerCase();
-      const expected = [...expectedTags, ...expectedTopics];
-      const score = expected.length === 0 ? Number(cards.length > 0) :
-        expected.filter((term) => evidence.includes(term.toLowerCase())).length / expected.length;
-      return { key: "retrieval_quality", score };
+      const audit = recipeRetrievalAudit(outputs);
+      const requireTournamentCandidates = referenceOutputs?.requireTournamentCandidates === true;
+      const score = audit &&
+        audit.vectorCandidates > 0 &&
+        audit.deduplicatedCandidateIds > 0 &&
+        audit.canonicalHydrationCount > 0 &&
+        (!requireTournamentCandidates || audit.tournamentCandidates > 0)
+        ? 1
+        : 0;
+      return { key: "retrieval_provenance", score };
     },
     async ({ inputs, outputs }: EvaluationArgs) => {
       const result = await judge(`Rate 0 to 1 for faithfulness. Every answer claim must be supported by the supplied Food.com tournament cards. Question: ${String(inputs.query)}\nAnswer: ${String(outputs.answer)}\nCards: ${JSON.stringify(recipeCards(outputs))}`);
@@ -114,15 +122,37 @@ type EvaluationArgs = {
   referenceOutputs?: Record<string, unknown>;
 };
 
-function recipeCards(outputs: Record<string, unknown>) {
+type EvaluatedRecipeCard = {
+  name: string;
+  matchedTags: string[];
+};
+
+function recipeCards(outputs: Record<string, unknown>): EvaluatedRecipeCard[] {
   const recipes = outputs.recipes;
-  if (!Array.isArray(recipes)) return [] as Array<{ name: string; matchedTags: string[] }>;
+  if (!Array.isArray(recipes)) return [];
   return recipes.flatMap((recipe) =>
     typeof recipe === "object" && recipe !== null &&
     "name" in recipe && typeof recipe.name === "string" &&
     "matchedTags" in recipe && Array.isArray(recipe.matchedTags) &&
     recipe.matchedTags.every((tag: unknown) => typeof tag === "string")
-      ? [{ name: recipe.name, matchedTags: recipe.matchedTags as string[] }]
+      ? [{
+        name: recipe.name,
+        matchedTags: recipe.matchedTags as string[],
+      }]
       : [],
   );
+}
+
+function recipeRetrievalAudit(outputs: Record<string, unknown>) {
+  const audit = outputs.retrievalAudit;
+  if (typeof audit !== "object" || audit === null) return null;
+  const values = audit as Record<string, unknown>;
+  const fields = ["vectorCandidates", "deduplicatedCandidateIds", "canonicalHydrationCount", "tournamentCandidates"] as const;
+  if (!fields.every((field) => typeof values[field] === "number" && Number.isFinite(values[field]))) return null;
+  return {
+    vectorCandidates: values.vectorCandidates as number,
+    deduplicatedCandidateIds: values.deduplicatedCandidateIds as number,
+    canonicalHydrationCount: values.canonicalHydrationCount as number,
+    tournamentCandidates: values.tournamentCandidates as number,
+  };
 }

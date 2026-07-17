@@ -64,6 +64,20 @@ function updateInventoryLabel(input: {
   };
 }
 
+function inventoryHasAssertions(input: {
+  inventory: Inventory;
+  assertions: AppliedSeededInventoryAssertion[];
+}) {
+  return input.assertions.every((assertion) => {
+    const item = input.inventory.items.find((candidate) => candidate.id === assertion.itemId);
+
+    return item?.label === assertion.label &&
+      item.name === assertedItemName(assertion.label) &&
+      item.review === "confirmed" &&
+      item.src.includes("user-asserted-label");
+  });
+}
+
 export function applySeededInventoryAssertions(input: {
   seededItems: ConversationContextSeededItem[];
   assertions: SeededInventoryAssertion[];
@@ -133,17 +147,21 @@ export function applySeededInventoryAssertions(input: {
       });
     }
 
-    saveFridgeInventory({
-      imageId,
-      inventory: updateInventoryLabel({
-        inventory,
-        assertions: inventoryAssertions.map(({ cropId, itemId, label }) => ({
-          cropId,
-          itemId,
-          label,
-        })),
-      }),
-    });
+    const appliedAssertions = inventoryAssertions.map(({ cropId, itemId, label }) => ({
+      cropId,
+      itemId,
+      label,
+    }));
+
+    if (!inventoryHasAssertions({ inventory, assertions: appliedAssertions })) {
+      saveFridgeInventory({
+        imageId,
+        inventory: updateInventoryLabel({
+          inventory,
+          assertions: appliedAssertions,
+        }),
+      });
+    }
   }
 
   return applied;

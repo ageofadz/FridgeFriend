@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ActionFunctionArgs } from "react-router";
 
+import { jsonError } from "../server/http.server";
 import { BoundingBox } from "../server/scan/schemas/inventory";
 import { seedInventoryBoundingBox } from "../server/query/services/seeded-bounding-box.server";
 
@@ -8,10 +9,6 @@ const SeedBoundingBoxRequest = z.object({
   imageId: z.string().min(1),
   boundingBox: BoundingBox,
 });
-
-function jsonError(error: string, status: number) {
-  return Response.json({ error }, { status });
-}
 
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") {

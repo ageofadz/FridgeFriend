@@ -1,9 +1,12 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-
+import type { FridgeFriendChatModel } from "../../ai/chat-model.server";
+import { HumanMessage } from "@langchain/core/messages";
+import {
+  CHAT_VISION_PROVIDER as CHAT_PROVIDER,
+  CHAT_VISION_MODEL as VISION_MODEL,
+} from "../../ai/chat-model.server";
 import type { PromptBundle } from "../../prompts/registry.server";
 import {
   RawDetection as RawDetectionSchema,
-  VISION_MODEL,
   type RawDetection,
 } from "../schemas/inventory";
 import {
@@ -24,7 +27,7 @@ import { createVisionModel } from "./vision-model.server";
 
 export type InventoryDetectionDependencies = {
   promptBundle: Pick<PromptBundle, "inventoryDetection">;
-  detectionModel?: ChatGoogleGenerativeAI;
+  detectionModel?: FridgeFriendChatModel;
 };
 
 function invalidInventoryDetection(reason: string) {
@@ -119,12 +122,57 @@ function validateRawDetectionStacking(rawDetections: RawDetection[]) {
   return null;
 }
 
+function validateInventoryDetectionResult(
+  result: InventoryDetectionModelResultValue,
+  imageId: string,
+) {
+  const parsedRawDetections = RawDetectionSchema.array().safeParse(
+    normalizeModelRawDetections(result.rawDetections),
+  );
+
+  if (!parsedRawDetections.success) {
+    return {
+      valid: false as const,
+      reason: `Inventory detection output failed validation: ${formatModelValidationError(parsedRawDetections.error, "rawDetections")}`,
+    };
+  }
+
+  const imageIdValidationReason = validateRawDetectionImageIds(
+    parsedRawDetections.data,
+    imageId,
+  );
+
+  if (imageIdValidationReason) {
+    return {
+      valid: false as const,
+      reason: imageIdValidationReason,
+    };
+  }
+
+  const stackingValidationReason = validateRawDetectionStacking(
+    parsedRawDetections.data,
+  );
+
+  if (stackingValidationReason) {
+    return {
+      valid: false as const,
+      reason: stackingValidationReason,
+    };
+  }
+
+  return {
+    valid: true as const,
+    rawDetections: parsedRawDetections.data,
+  };
+}
+
 async function runInventoryDetectionModel(
   input: {
     imageId: string;
     imageDataUrl: string;
   },
   deps: InventoryDetectionDependencies,
+  correctionReason?: string,
 ): Promise<InventoryDetectionModelResultValue> {
   const model = deps.detectionModel ?? createVisionModel();
   const structuredModel = model.withStructuredOutput<InventoryDetectionModelResultValue>(
@@ -139,11 +187,18 @@ async function runInventoryDetectionModel(
     image_data_url: input.imageDataUrl,
   });
 
+  if (correctionReason) {
+    messages.push(new HumanMessage(
+      `Correct the inventory detections you just produced for this same image. ${correctionReason} Return a complete replacement rawDetections array. Every bbox must tightly cover the visible item in one normalized 0-to-1 coordinate system, with width and height greater than 0.`,
+    ));
+  }
+
   return structuredModel.invoke(messages, {
     tags: ["scan", "detect_inventory"],
     metadata: {
       langsmithPromptName: loadedPrompt.name,
       langsmithPromptRef: loadedPrompt.ref,
+      provider: CHAT_PROVIDER,
       model: VISION_MODEL,
     },
   });
@@ -171,49 +226,36 @@ export async function detectInventory(
     );
   }
 
-  const result = await runInventoryDetectionModel(
+  let result = await runInventoryDetectionModel(
     {
       imageId: state.imageIds[0],
       imageDataUrl: imageDataUrls[0],
     },
     deps,
   );
-  const parsedRawDetections = RawDetectionSchema.array().safeParse(
-    normalizeModelRawDetections(result.rawDetections),
-  );
+  let validation = validateInventoryDetectionResult(result, state.imageIds[0]);
 
-  if (!parsedRawDetections.success) {
-    return invalidInventoryDetectionWithModelOutput(
-      `Inventory detection output failed validation: ${formatModelValidationError(parsedRawDetections.error, "rawDetections")}`,
-      result,
+  for (let attempt = 0; !validation.valid && attempt < 2; attempt += 1) {
+    result = await runInventoryDetectionModel(
+      {
+        imageId: state.imageIds[0],
+        imageDataUrl: imageDataUrls[0],
+      },
+      deps,
+      validation.reason,
     );
+    validation = validateInventoryDetectionResult(result, state.imageIds[0]);
   }
 
-  const imageIdValidationReason = validateRawDetectionImageIds(
-    parsedRawDetections.data,
-    state.imageIds[0],
-  );
-
-  if (imageIdValidationReason) {
+  if (!validation.valid) {
     return invalidInventoryDetectionWithModelOutput(
-      imageIdValidationReason,
-      result,
-    );
-  }
-
-  const stackingValidationReason = validateRawDetectionStacking(
-    parsedRawDetections.data,
-  );
-
-  if (stackingValidationReason) {
-    return invalidInventoryDetectionWithModelOutput(
-      stackingValidationReason,
+      validation.reason,
       result,
     );
   }
 
   return {
-    rawDetections: parsedRawDetections.data,
+    rawDetections: validation.rawDetections,
     detectionModelRawOutput: result,
     detectionValidation: {
       valid: true,

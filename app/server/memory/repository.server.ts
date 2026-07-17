@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 
 import {
   dietaryPreferences,
@@ -18,7 +18,9 @@ import {
   withDatabase,
 } from "../sqlite.server";
 import {
-  MemoryCandidateSchema,
+  DietaryPreferenceCandidateSchema,
+  DietaryRestrictionCandidateSchema,
+  GoalCandidateSchema,
   StorageLocationSchema,
   type DietaryPreferenceMemory,
   type DietaryRestrictionMemory,
@@ -116,13 +118,6 @@ export type HouseholdInventoryOperationResult = {
   items: Array<Partial<ExternalInventoryMemory> & { id: string }>;
 };
 
-export function defaultMemoryProfile(): MemoryProfile {
-  return {
-    userId: DEFAULT_USER_ID,
-    fridgeId: DEFAULT_FRIDGE_ID,
-  };
-}
-
 export function normalizeMemoryKey(value: string) {
   return value
     .normalize("NFKC")
@@ -215,7 +210,7 @@ function externalInventoryFromRow(
 function restrictionFromRow(
   row: typeof dietaryRestrictions.$inferSelect,
 ): DietaryRestrictionMemory {
-  const parsed = MemoryCandidateSchema.options[1].omit({
+  const parsed = DietaryRestrictionCandidateSchema.omit({
     kind: true,
     scope: true,
     action: true,
@@ -243,7 +238,7 @@ function restrictionFromRow(
 function preferenceFromRow(
   row: typeof dietaryPreferences.$inferSelect,
 ): DietaryPreferenceMemory {
-  const parsed = MemoryCandidateSchema.options[2].omit({
+  const parsed = DietaryPreferenceCandidateSchema.omit({
     kind: true,
     scope: true,
     action: true,
@@ -269,7 +264,7 @@ function preferenceFromRow(
 }
 
 function goalFromRow(row: typeof goals.$inferSelect): GoalMemory {
-  const parsed = MemoryCandidateSchema.options[3].omit({
+  const parsed = GoalCandidateSchema.omit({
     kind: true,
     scope: true,
     action: true,
@@ -404,6 +399,73 @@ export function listStructuredMemoryContext(input: MemoryProfile): Omit<
       dietaryPreferences: preferences,
       activeGoals,
     };
+  });
+}
+
+export function listUserSemanticMemories(input: MemoryProfile): SemanticMemory[] {
+  const profile = ensureMemoryProfile(input);
+
+  return withDatabase((db) =>
+    db
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.namespaceType, "user"),
+          eq(memories.namespaceId, profile.userId),
+          eq(memories.active, 1),
+        ),
+      )
+      .all()
+      .map(semanticMemoryFromRow)
+  );
+}
+
+export function hasActiveSemanticMemories(input: MemoryProfile) {
+  const profile = ensureMemoryProfile(input);
+
+  return withDatabase((db) =>
+    db
+      .select({ id: memories.id })
+      .from(memories)
+      .where(
+        and(
+          eq(memories.active, 1),
+          or(
+            and(eq(memories.namespaceType, "user"), eq(memories.namespaceId, profile.userId)),
+            and(eq(memories.namespaceType, "fridge"), eq(memories.namespaceId, profile.fridgeId)),
+          ),
+        ),
+      )
+      .limit(1)
+      .get() !== undefined,
+  );
+}
+
+export function resetUserProfileMemories(input: MemoryProfile) {
+  const profile = ensureMemoryProfile(input);
+
+  return withDatabase((db) => {
+    db.delete(dietaryRestrictions)
+      .where(eq(dietaryRestrictions.userId, profile.userId))
+      .run();
+
+    db.delete(dietaryPreferences)
+      .where(eq(dietaryPreferences.userId, profile.userId))
+      .run();
+
+    db.delete(goals)
+      .where(eq(goals.userId, profile.userId))
+      .run();
+
+    db.delete(memories)
+      .where(
+        and(
+          eq(memories.namespaceType, "user"),
+          eq(memories.namespaceId, profile.userId),
+        ),
+      )
+      .run();
   });
 }
 
@@ -1310,16 +1372,4 @@ export function applyMemoryCandidate(input: {
       semanticMemory: semanticMemoryFromRow(row),
     };
   });
-}
-
-export function applyMemoryCandidates(input: {
-  profile: MemoryProfile;
-  validations: MemoryValidationResult[];
-}) {
-  return input.validations.map((validation) =>
-    applyMemoryCandidate({
-      profile: input.profile,
-      validation,
-    })
-  );
 }

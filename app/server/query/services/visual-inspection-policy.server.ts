@@ -1,6 +1,6 @@
 import type { QueryIntent } from "../schemas/query";
 
-export type FocusedVisualInspectionPlan = {
+type FocusedVisualInspectionPlan = {
   enabled: boolean;
   itemIds?: string[];
 };

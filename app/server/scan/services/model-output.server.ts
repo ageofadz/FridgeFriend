@@ -58,6 +58,30 @@ function normalizeGeminiBoxAxis(start: number, extentOrEnd: number) {
   };
 }
 
+function isGeminiGridValue(value: number) {
+  return value > 1 && value <= GEMINI_BOX_GRID_SIZE;
+}
+
+function normalizeMixedGeminiBoxAxis(start: number, extentOrEnd: number) {
+  const startIsGeminiGridValue = isGeminiGridValue(start);
+  const extentIsGeminiGridValue = isGeminiGridValue(extentOrEnd);
+
+  if (!startIsGeminiGridValue && !extentIsGeminiGridValue) {
+    return { start, size: extentOrEnd };
+  }
+
+  if (startIsGeminiGridValue && extentIsGeminiGridValue) {
+    return normalizeGeminiBoxAxis(start, extentOrEnd);
+  }
+
+  return {
+    start: startIsGeminiGridValue ? normalizeGeminiBoxValue(start) : start,
+    size: extentIsGeminiGridValue
+      ? normalizeGeminiBoxValue(extentOrEnd)
+      : extentOrEnd,
+  };
+}
+
 export function normalizeModelBoundingBox<TBox extends ModelBoundingBox>(
   bbox: TBox,
 ) {
@@ -71,16 +95,16 @@ export function normalizeModelBoundingBox<TBox extends ModelBoundingBox>(
     bbox.width,
     bbox.height,
   ];
-  const isGeminiGridBox = values.every(
+  const hasSupportedCoordinateRange = values.every(
     (value) => value >= 0 && value <= GEMINI_BOX_GRID_SIZE,
   );
 
-  if (!isGeminiGridBox) {
+  if (!hasSupportedCoordinateRange) {
     return bbox;
   }
 
-  const horizontal = normalizeGeminiBoxAxis(bbox.x, bbox.width);
-  const vertical = normalizeGeminiBoxAxis(bbox.y, bbox.height);
+  const horizontal = normalizeMixedGeminiBoxAxis(bbox.x, bbox.width);
+  const vertical = normalizeMixedGeminiBoxAxis(bbox.y, bbox.height);
 
   return {
     x: horizontal.start,

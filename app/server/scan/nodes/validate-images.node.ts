@@ -1,4 +1,3 @@
-import { loadPromptBundle } from "../../prompts/registry.server";
 import {
   type ImageValidationDependencies,
   validateImageState,
@@ -10,12 +9,6 @@ export async function validateImagesNode(
   deps: ImageValidationDependencies,
 ) {
   return validateImageState(state, deps);
-}
-
-export async function validateImageNode(state: ScanStateValue) {
-  return validateImagesNode(state, {
-    promptBundle: await loadPromptBundle(),
-  });
 }
 
 export function createValidateImagesNode(deps: ImageValidationDependencies) {

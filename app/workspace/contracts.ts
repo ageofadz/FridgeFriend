@@ -1,12 +1,21 @@
 import { z } from "zod";
 
 export const WorkspaceViewSchema = z.enum(["scene", "photo", "compare"]);
+
+export const STORAGE_IMAGE_LOCATIONS = ["fridge", "freezer", "pantry"] as const;
+export type StorageImageLocation = (typeof STORAGE_IMAGE_LOCATIONS)[number];
+
 export const WorkspaceLocationSchema = z.enum([
-  "fridge",
-  "freezer",
-  "pantry",
+  ...STORAGE_IMAGE_LOCATIONS,
   "all_inventory",
 ]);
+
+export const WorkspaceBoundingBoxSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  width: z.number().positive().max(1),
+  height: z.number().positive().max(1),
+});
 
 export const ConversationContextSchema = z.object({
   selectedItemIds: z.array(z.string()).default([]),
@@ -16,6 +25,12 @@ export const ConversationContextSchema = z.object({
     itemId: z.string(),
     imageId: z.string(),
     cropId: z.string(),
+    userSeeded: z.literal(true).default(true),
+  })).default([]),
+  seededBoundingBoxes: z.array(z.object({
+    imageId: z.string(),
+    cropId: z.string(),
+    boundingBox: WorkspaceBoundingBoxSchema,
     userSeeded: z.literal(true).default(true),
   })).default([]),
 });
@@ -33,13 +48,6 @@ export const WorkspaceSelectionSchema = z.object({
   itemIds: z.array(z.string()),
   source: z.enum(["agent", "user"]),
   pinned: z.boolean(),
-});
-
-export const WorkspaceBoundingBoxSchema = z.object({
-  x: z.number().min(0).max(1),
-  y: z.number().min(0).max(1),
-  width: z.number().positive().max(1),
-  height: z.number().positive().max(1),
 });
 
 export const WorkspaceActionSchema = z.discriminatedUnion("type", [
@@ -83,6 +91,7 @@ export const AgentActivityEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("enrichment_completed"), itemId: z.string(), fields: z.array(z.string()).min(1) }),
   z.object({ type: z.literal("enrichment_failed"), itemId: z.string(), error: z.string() }),
   z.object({ type: z.literal("inventory_assertion_applied"), itemId: z.string(), cropId: z.string(), label: z.string().min(1) }),
+  z.object({ type: z.literal("inventory_assertion_failed"), error: z.string() }),
   z.object({ type: z.literal("clarification_required"), itemId: z.string().nullable(), question: z.string() }),
 ]);
 
@@ -130,7 +139,7 @@ export function focusFromWorkspaceAction(action: WorkspaceAction): WorkspaceFocu
   }
 
   if (action.type === "preview_reorganization") {
-    return { mode: "zone", itemIds: action.placements.map((placement) => placement.itemId), zoneIds: action.placements.map((placement) => placement.zoneId), recipeId: null, emphasis: "candidate", reason: "Proposed reorganization" };
+    return { mode: "zone", itemIds: action.placements.map((placement) => placement.itemId), zoneIds: action.placements.map((placement) => placement.zoneId), recipeId: null, emphasis: "candidate", reason: "Proposed inventory placement" };
   }
 
   return emptyWorkspaceFocus();

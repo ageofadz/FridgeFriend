@@ -10,8 +10,14 @@
     "langgraph:up": "langgraphjs up --config ./langgraph.json",
     "prompts:push": "node scripts/push-langsmith-prompts.mjs",
     "recipes:index": "tsx scripts/index-recipes.ts",
+    "recipes:demo:seed": "tsx scripts/seed-demo-corpus.ts",
+    "recipes:demo:preembed": "tsx scripts/build-preembedded-demo-data.ts",
+    "recipes:demo:verify": "tsx scripts/seed-demo-corpus.ts",
+    "recipes:demo:select": "tsx scripts/select-demo-recipe-corpus.ts",
     "recipes:tags:index": "tsx scripts/index-recipe-tags.ts",
     "rag:eval": "tsx scripts/run-recipe-rag-evals.ts",
+    "query:intent:eval": "tsx scripts/run-query-intent-evals.ts",
+    "query:route-contract:eval": "tsx scripts/run-query-route-contract-evals.ts",
     "dataset:seed-scan": "node scripts/seed-langsmith-scan-dataset.mjs",
     "start": "react-router-serve ./build/server/index.js",
     "test": "vitest run --passWithNoTests",
@@ -20,6 +26,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@langchain/anthropic": "^1.5.1",
     "@langchain/core": "^1.0.0",
     "@langchain/google-genai": "^2.2.0",
     "@langchain/langgraph": "^1.0.0",
@@ -51,8 +58,8 @@
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^5.1.1",
-    "typescript": "^5.9.3",
     "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
     "vite": "^7.2.4",
     "vitest": "^4.0.14"
   }
