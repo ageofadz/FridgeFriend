@@ -5,8 +5,15 @@ const TAG_ALIASES: Record<string, string> = {
   budget: "inexpensive",
   "budget friendly": "inexpensive",
   cheap: "inexpensive",
+  dinner: "main dish",
+  dinners: "main dish",
+  entree: "main dish",
+  entrees: "main dish",
   inexpensive: "inexpensive",
+  meal: "main dish",
+  meals: "main dish",
   quick: "30 minutes or less",
+  supper: "main dish",
   fast: "30 minutes or less",
 };
 

@@ -11,16 +11,18 @@ export {
   CHAT_PROVIDER,
 } from "../../ai/chat-model.server";
 export const INTENT_ROUTING_TIMEOUT_MS = 10_000;
+export const INTENT_ROUTING_MAX_OUTPUT_TOKENS = 256;
 
-export function createQueryModel(streaming = false) {
+export function createQueryModel(streaming = false, maxOutputTokens?: number) {
   return createChatModel({
     model: GENERAL_MODEL,
     streaming,
+    maxOutputTokens,
   });
 }
 
 export function createIntentRoutingModel() {
-  return createQueryModel(false);
+  return createQueryModel(false, INTENT_ROUTING_MAX_OUTPUT_TOKENS);
 }
 
 export function extractMessageText(message: unknown) {

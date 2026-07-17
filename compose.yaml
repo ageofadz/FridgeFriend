@@ -2,19 +2,21 @@ name: fridgefriend
 
 services:
   init-data:
-    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    build: .
+    image: ${FRIDGEFRIEND_IMAGE:-fridgefriend:local}
     command: ["node", "scripts/initialize-prebuilt-demo-data.mjs"]
     environment:
       DEMO_APP_DATA_PATH: /var/lib/fridgefriend/app
       DEMO_CHROMA_DATA_PATH: /var/lib/fridgefriend/chroma
-      PREBUILT_DATA_PATH: /app/prebuilt-data
+      PREBUILT_DATA_PATH: /app/demo-corpus/prebuilt-data
     volumes:
       - app-data:/var/lib/fridgefriend/app
       - chroma-data:/var/lib/fridgefriend/chroma
     restart: "no"
 
   chroma:
-    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    build: .
+    image: ${FRIDGEFRIEND_IMAGE:-fridgefriend:local}
     command: ["npm", "run", "chroma"]
     environment:
       CHROMA_HOST: 0.0.0.0
@@ -33,13 +35,18 @@ services:
       start_period: 5s
 
   app:
-    image: ${FRIDGEFRIEND_IMAGE:-ghcr.io/ageofadz/fridgefriend:latest}
+    build: .
+    image: ${FRIDGEFRIEND_IMAGE:-fridgefriend:local}
     command: ["npm", "run", "start"]
     environment:
       CHROMA_URL: http://chroma:8000
       DATABASE_PATH: /var/lib/fridgefriend/app/fridgefriend.sqlite
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:?GOOGLE_API_KEY is required to run FridgeFriend}
       HOST: 0.0.0.0
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-}
       PORT: "3000"
     depends_on:
       chroma:

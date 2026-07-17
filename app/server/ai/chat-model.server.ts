@@ -36,26 +36,29 @@ export function createChatModelForProvider(input: {
   provider: string;
   model: string;
   streaming?: boolean;
+  maxOutputTokens?: number;
 }): FridgeFriendChatModel {
   switch (input.provider) {
     case "anthropic":
       return new ChatAnthropic({
         model: input.model,
-        maxTokens: CHAT_MAX_OUTPUT_TOKENS,
+        maxTokens: input.maxOutputTokens ?? CHAT_MAX_OUTPUT_TOKENS,
         thinking: { type: "disabled" },
         maxRetries: 0,
         apiKey: requiredEnv("ANTHROPIC_API_KEY"),
         streaming: input.streaming ?? false,
       }) as FridgeFriendChatModel;
     case "google":
-      return new ChatGoogleGenerativeAI({
+      const model = new ChatGoogleGenerativeAI({
         model: input.model,
         temperature: 0,
-        maxOutputTokens: CHAT_MAX_OUTPUT_TOKENS,
+        maxOutputTokens: input.maxOutputTokens ?? CHAT_MAX_OUTPUT_TOKENS,
         maxRetries: 0,
         apiKey: requiredEnv("GOOGLE_API_KEY"),
-        streaming: input.streaming ?? false,
-      }) as FridgeFriendChatModel;
+        streaming: false,
+      });
+      model.disableStreaming = true;
+      return model as FridgeFriendChatModel;
     default:
       throw new Error(`Unsupported chat provider: ${input.provider}`);
   }
@@ -65,10 +68,12 @@ export function createChatModel(input: {
   model: string;
   streaming?: boolean;
   provider?: ChatProvider;
+  maxOutputTokens?: number;
 }): FridgeFriendChatModel {
   return createChatModelForProvider({
     provider: input.provider ?? CHAT_PROVIDER,
     model: input.model,
     streaming: input.streaming,
+    maxOutputTokens: input.maxOutputTokens,
   });
 }

@@ -16,4 +16,11 @@ describe("resolveFoodComTags", () => {
   it("does not resolve a near-miss into a catalog tag", () => {
     expect(resolveFoodComTags(["vegetarain meals"], ["vegetarian", "vegan"])).toEqual([]);
   });
+
+  it("maps dinner wording onto the Food.com main dish tag", () => {
+    expect(resolveFoodComTags(
+      ["What few pantry ingredients should I buy to unlock the most dinners?"],
+      ["main dish", "dinner party", "inexpensive"],
+    )).toEqual(["main dish"]);
+  });
 });

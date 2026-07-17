@@ -383,6 +383,7 @@ describe("manage_household_inventory", () => {
     expect(persistMemoryValidations).toHaveBeenCalledWith({
       userId: "user-injected",
       fridgeId: "fridge-injected",
+      imageId: null,
       validations: state.memoryValidations,
     });
     expect(result.memoryWriteResults).toMatchObject([

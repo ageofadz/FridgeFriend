@@ -211,4 +211,14 @@ describe("query stream parser", () => {
       storageLocation: "fridge",
     });
   });
+
+  it("accepts inventory updated events", () => {
+    expect(parseQueryStreamEvent('{"type":"inventory_updated","inventory":{"id":"inventory-1","items":[]}}')).toEqual({
+      type: "inventory_updated",
+      inventory: {
+        id: "inventory-1",
+        items: [],
+      },
+    });
+  });
 });

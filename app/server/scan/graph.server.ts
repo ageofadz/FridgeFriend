@@ -1,6 +1,9 @@
 import { END, START, StateGraph, type RetryPolicy } from "@langchain/langgraph";
 
 import { checkpointer } from "../checkpointer.server";
+import {
+  readGeminiStream,
+} from "../ai/gemini-errors.server";
 import type { StorageImageLocation } from "../images.server";
 import { getLangSmithConfig } from "../langsmith.server";
 import { loadPromptBundle } from "../prompts/registry.server";
@@ -164,7 +167,17 @@ export async function* streamScanForStorageImage(
     },
   );
 
-  for await (const update of stream) {
+  for await (const streamResult of readGeminiStream(stream, "Scan graph stream")) {
+    if (streamResult.type === "gemini_stream_parse_error") {
+      yield {
+        type: "error",
+        error: streamResult.error,
+      };
+      return (await graph.getState(config)).values as ScanStateValue;
+    }
+
+    const update = streamResult.chunk;
+
     if (!isRecord(update)) {
       throw new Error("Scan graph emitted an update with an invalid shape");
     }

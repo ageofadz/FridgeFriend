@@ -1,6 +1,9 @@
 import { Command, END, START, Overwrite, StateGraph, type RetryPolicy } from "@langchain/langgraph";
 
 import { checkpointer } from "../checkpointer.server";
+import {
+  readGeminiStream,
+} from "../ai/gemini-errors.server";
 import { getLangSmithConfig } from "../langsmith.server";
 import { loadPromptBundle } from "../prompts/registry.server";
 import { createCalculateSpaceNode } from "./nodes/calculate-space.node";
@@ -213,7 +216,7 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     .addEdge("load_context", "apply_seeded_inventory_assertions")
     .addEdge("apply_seeded_inventory_assertions", "determine_intent")
     .addConditionalEdges("determine_intent", routeIntentOrMemory, {
-      inventory: "query_inventory",
+      inventory: "extract_memory_candidates",
       expiry: "query_inventory",
       food_knowledge: "respond",
       recipe: "query_inventory",
@@ -646,6 +649,24 @@ function organizationPlanFromContext(context: Record<string, unknown>): Organiza
   return parsed.success ? parsed.data : null;
 }
 
+function scannedInventoryMutationInventories(context: Record<string, unknown>) {
+  if (!Array.isArray(context.scannedInventoryMutations)) {
+    return [];
+  }
+
+  return context.scannedInventoryMutations.flatMap((mutation) => {
+    if (
+      !isRecord(mutation) ||
+      mutation.status !== "updated" ||
+      !isRecord(mutation.inventory)
+    ) {
+      return [];
+    }
+
+    return [mutation.inventory];
+  });
+}
+
 function rankedRecipesFromUpdate(value: unknown): RankedRecipe[] {
   if (!Array.isArray(value)) {
     return [];
@@ -735,7 +756,17 @@ export async function* streamQueryForFridgeImage(
   );
   let interrupted = false;
 
-  for await (const streamedChunk of stream) {
+  for await (const streamResult of readGeminiStream(stream, "Query graph stream")) {
+    if (streamResult.type === "gemini_stream_parse_error") {
+      yield {
+        type: "error",
+        error: streamResult.error,
+      };
+      return;
+    }
+
+    const streamedChunk = streamResult.chunk;
+
     if (!Array.isArray(streamedChunk) || streamedChunk.length !== 2) {
       continue;
     }
@@ -830,6 +861,12 @@ export async function* streamQueryForFridgeImage(
 
         if (typeof context.memoryWriteVerificationError === "string") {
           finalMemoryWriteVerificationError = context.memoryWriteVerificationError;
+        }
+
+        if (node === "apply_memory_writes") {
+          for (const inventory of scannedInventoryMutationInventories(context)) {
+            yield { type: "inventory_updated", inventory };
+          }
         }
 
         const workspaceActions = workspaceActionsFromContext(context);

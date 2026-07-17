@@ -877,6 +877,7 @@ describe("mapZones", () => {
           img: image.id,
           type: "shelf",
           bbox: { x: 0.1, y: 0.2, width: 0.8, height: 0.3 },
+          surfaceY: 0.5,
           ord: 0,
           name: "top shelf",
           conf: 0.91,
@@ -1019,6 +1020,7 @@ describe("mapZones", () => {
           img: image.id,
           type: "shelf",
           bbox: { x: 100, y: 200, width: 800, height: 300 },
+          surfaceY: 500,
           ord: 0,
           name: "top shelf",
           conf: 0.91,
@@ -1083,6 +1085,7 @@ describe("mapZones", () => {
           img: image.id,
           type: "shelf",
           bbox: { x: 0, y: 232, width: 1, height: 0.12 },
+          surfaceY: 352,
           ord: 0,
           name: "top shelf",
           conf: 1,
@@ -1146,6 +1149,7 @@ describe("mapZones", () => {
           img: image.id,
           type: "shelf",
           bbox: { x: 0, y: 0.232, width: 0.001, height: 0.12 },
+          surfaceY: 0.352,
           ord: 0,
           name: "top shelf",
           conf: 1,
@@ -1785,6 +1789,16 @@ describe("inventory reconciliation", () => {
             ],
           },
         ],
+        groundedPlacements: [
+          {
+            detectionId: "detection-unknown-1",
+            status: "placed",
+            supportKind: "zone",
+            supportId: "zone-1",
+            depth: { back: 0.5, front: 0.75 },
+            confidence: 0.83,
+          },
+        ],
       } as never),
     ).resolves.toMatchObject({
       inventory: {
@@ -1798,7 +1812,7 @@ describe("inventory reconciliation", () => {
             loc: {
               observations: [
                 {
-                  depthBackRatio: 1,
+                  depthBackRatio: 0.5,
                 },
               ],
             },
@@ -1867,6 +1881,16 @@ describe("inventory reconciliation", () => {
             ],
           },
         ],
+        groundedPlacements: [
+          {
+            detectionId: "detection-1",
+            status: "placed",
+            supportKind: "zone",
+            supportId: "zone-1",
+            depth: { back: 0.5, front: 0.75 },
+            confidence: 0.9,
+          },
+        ],
       } as never),
     ).resolves.toMatchObject({
       inventory: {
@@ -1876,7 +1900,7 @@ describe("inventory reconciliation", () => {
             loc: {
               observations: [
                 {
-                  depthBackRatio: 0.5000000000000001,
+                  depthBackRatio: 0.5,
                 },
               ],
             },
@@ -1987,6 +2011,24 @@ describe("inventory reconciliation", () => {
           ],
         },
       ],
+      groundedPlacements: [
+        {
+          detectionId: "detection-1",
+          status: "placed",
+          supportKind: "zone",
+          supportId: "zone-1",
+          depth: { back: 0.25, front: 0.5 },
+          confidence: 0.9,
+        },
+        {
+          detectionId: "detection-2",
+          status: "placed",
+          supportKind: "item",
+          supportId: "detection-1",
+          depth: { back: 0.7, front: 0.9 },
+          confidence: 0.82,
+        },
+      ],
     } as never);
     const supportItem = result.inventory.items.find((item) => item.id === "detection-1")!;
     const stackedItem = result.inventory.items.find((item) => item.id === "detection-2")!;
@@ -2063,6 +2105,16 @@ describe("inventory reconciliation", () => {
             ],
           },
         ],
+        groundedPlacements: [
+          {
+            detectionId: "detection-1",
+            status: "placed",
+            supportKind: "zone",
+            supportId: "zone-2",
+            depth: { back: 0.25, front: 0.5 },
+            confidence: 0.72,
+          },
+        ],
       } as never),
     ).resolves.toMatchObject({
       inventory: {
@@ -2074,7 +2126,7 @@ describe("inventory reconciliation", () => {
               zoneId: "zone-2",
               observations: [
                 {
-                  depthBackRatio: 0.24999999999999994,
+                  depthBackRatio: 0.25,
                 },
               ],
             },
@@ -2104,6 +2156,14 @@ describe("inventory reconciliation", () => {
         reconciledLocations: [],
         adjudicationDecisions: [],
         zoneMaps: [],
+        groundedPlacements: [
+          {
+            detectionId: "detection-1",
+            status: "needs_review",
+            reason: "No mapped storage zone is available for image image-1",
+            confidence: 0,
+          },
+        ],
       } as never),
     ).resolves.toMatchObject({
       inventory: {
@@ -2111,7 +2171,7 @@ describe("inventory reconciliation", () => {
           {
             id: "detection-1",
             loc: {
-              status: "unmatched",
+              status: "needs_review",
               zoneId: null,
               zoneType: null,
               observations: [
@@ -2191,6 +2251,18 @@ describe("inventory reconciliation", () => {
             ],
           },
         ],
+        groundedPlacements: [
+          {
+            detectionId: "detection-1",
+            status: "placed",
+            supportKind: "zone",
+            supportId: "zone-1",
+            depth: bbox.y < 0.2
+              ? { back: 0.2, front: 0.4 }
+              : { back: 0.6, front: 0.8 },
+            confidence: 0.9,
+          },
+        ],
       } as never);
     const front = await inventoryForBox({ x: 0.2, y: 0.12, width: 0.1, height: 0.08 });
     const back = await inventoryForBox({ x: 0.2, y: 0.3, width: 0.1, height: 0.2 });
@@ -2228,6 +2300,20 @@ describe("inventory reconciliation", () => {
         reconciledLocations: [],
         adjudicationDecisions: [],
         zoneMaps: [],
+        groundedPlacements: [
+          {
+            detectionId: "detection-1",
+            status: "needs_review",
+            reason: "No mapped storage zone is available for image image-1",
+            confidence: 0,
+          },
+          {
+            detectionId: "detection-2",
+            status: "needs_review",
+            reason: "No mapped storage zone is available for image image-1",
+            confidence: 0,
+          },
+        ],
       } as never),
     ).resolves.toMatchObject({
       inventory: {
@@ -2235,7 +2321,7 @@ describe("inventory reconciliation", () => {
           {
             id: "detection-1",
             loc: {
-              status: "unmatched",
+              status: "needs_review",
               zoneId: null,
               zoneType: null,
               observations: [
@@ -2248,7 +2334,7 @@ describe("inventory reconciliation", () => {
           {
             id: "detection-2",
             loc: {
-              status: "unmatched",
+              status: "needs_review",
               zoneId: null,
               zoneType: null,
               observations: [

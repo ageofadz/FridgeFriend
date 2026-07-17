@@ -88,6 +88,20 @@ describe("grocery planner routing", () => {
       context: { intentRouting: { shoppingMode: "pantry_completion" } },
     }))).toBe("plan_pantry_completion");
   });
+
+  it("does not rewrite or discard pantry completion candidates after an irrelevant retrieval grade", () => {
+    expect(routeRecipeRetrievalGrade(state({
+      intent: "shopping",
+      context: { intentRouting: { shoppingMode: "pantry_completion" } },
+      recipeRetrievalGrade: { relevant: false, reason: "breakfast-heavy set" },
+    }))).toBe("plan_pantry_completion");
+    expect(routeRecipeRetrievalGrade(state({
+      intent: "shopping",
+      context: { intentRouting: { shoppingMode: "pantry_completion" } },
+      tournamentCandidates: [],
+      recipeRetrievalGrade: { relevant: false, reason: "empty set" },
+    }))).toBe("plan_pantry_completion");
+  });
 });
 
 describe("scoped inventory split routing", () => {

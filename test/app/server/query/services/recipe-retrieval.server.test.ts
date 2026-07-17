@@ -104,6 +104,39 @@ describe("rankRecipeCandidates", () => {
     });
   });
 
+  it("uses fuzzy ingredient names for matched and missing recipe coverage", () => {
+    const tortillaDinner = recipe({
+      id: "tortilla-dinner",
+      name: "Tortilla Dinner",
+      ingredients: [
+        { rawName: "corn tortillas", canonicalName: "corn tortillas" },
+        { rawName: "tortillas", canonicalName: "tortillas" },
+        { rawName: "salt and pepper", canonicalName: "salt and pepper" },
+        { rawName: "salt", canonicalName: "salt" },
+        { rawName: "bell pepper", canonicalName: "bell pepper" },
+      ],
+    });
+
+    const result = rankRecipeCandidates({
+      candidates: [{ recipeId: "tortilla-dinner", semanticScore: 0.8 }],
+      recipes: [tortillaDinner],
+      search,
+      availableIngredients: [
+        { name: "tortillas", expirationDate: null },
+        { name: "salt", expirationDate: null },
+      ],
+      dietaryRestrictions: [],
+      dietaryPreferences: [],
+      activeGoals: [],
+    });
+
+    expect(result.recipes[0]).toMatchObject({
+      ingredients: ["tortilla", "salt", "bell pepper"],
+      matchedIngredients: ["tortilla", "salt"],
+      missingIngredients: ["bell pepper"],
+    });
+  });
+
   it("enforces time, calories, protein, and dietary-tag constraints", () => {
     const allowed = recipe({
       id: "1",

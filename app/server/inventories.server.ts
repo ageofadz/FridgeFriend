@@ -9,6 +9,7 @@ import {
 } from "./scan/schemas/inventory";
 import { withDatabase } from "./sqlite.server";
 import type { StorageImageLocation } from "../workspace/contracts";
+import type { StorageLocation } from "./memory/schemas";
 
 function storageLocationLabel(storageLocation: StorageImageLocation) {
   return storageLocation[0].toUpperCase() + storageLocation.slice(1);
@@ -267,4 +268,112 @@ export function applyFridgeInventorySplit(input: {
       items: [...inventory.items.filter((item) => !replacementIds.has(item.id)), ...splitItems],
     },
   });
+}
+
+function normalizedInventoryText(value: string) {
+  return value
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function normalizedInventoryTokens(value: string) {
+  return normalizedInventoryText(value)
+    .split(" ")
+    .map((token) => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token)
+    .filter(Boolean);
+}
+
+function tokenSetIncludesAll(container: Set<string>, tokens: string[]) {
+  return tokens.length > 0 && tokens.every((token) => container.has(token));
+}
+
+function inventoryTextMatches(itemValue: string, targetValue: string) {
+  const itemText = normalizedInventoryText(itemValue);
+  const targetText = normalizedInventoryText(targetValue);
+
+  if (itemText === targetText) {
+    return true;
+  }
+
+  const itemTokens = normalizedInventoryTokens(itemText);
+  const targetTokens = normalizedInventoryTokens(targetText);
+  const itemTokenSet = new Set(itemTokens);
+  const targetTokenSet = new Set(targetTokens);
+
+  return tokenSetIncludesAll(itemTokenSet, targetTokens) ||
+    tokenSetIncludesAll(targetTokenSet, itemTokens);
+}
+
+function storageLocationMatchesZoneType(
+  storageLocation: StorageLocation,
+  zoneType: Inventory["items"][number]["loc"]["zoneType"],
+) {
+  if (storageLocation === "fridge") {
+    return zoneType === null ||
+      zoneType === "shelf" ||
+      zoneType === "drawer" ||
+      zoneType === "door_shelf" ||
+      zoneType === "unknown";
+  }
+
+  return zoneType === storageLocation;
+}
+
+export function removeItemsFromFridgeInventory(input: {
+  imageId: string;
+  name: string;
+  storageLocation: StorageLocation;
+}) {
+  const inventory = getFridgeInventoryForImage(input.imageId);
+
+  if (!inventory) {
+    return {
+      status: "not_applicable" as const,
+      imageId: input.imageId,
+      inventory: null,
+      removedItemIds: [],
+      message: `Scanned inventory for image ${input.imageId} was not found`,
+    };
+  }
+
+  const targetName = normalizedInventoryText(input.name);
+  const matchingItemIds = new Set(
+    inventory.items
+      .filter((item) =>
+        storageLocationMatchesZoneType(input.storageLocation, item.loc.zoneType) &&
+        (
+          inventoryTextMatches(item.name, targetName) ||
+          inventoryTextMatches(item.label, targetName)
+        )
+      )
+      .map((item) => item.id),
+  );
+
+  if (matchingItemIds.size === 0) {
+    return {
+      status: "not_found" as const,
+      imageId: input.imageId,
+      inventory,
+      removedItemIds: [],
+      message: `No scanned inventory item matched ${input.name} in ${input.storageLocation}`,
+    };
+  }
+
+  const updatedInventory = saveFridgeInventory({
+    imageId: input.imageId,
+    inventory: {
+      ...inventory,
+      items: inventory.items.filter((item) => !matchingItemIds.has(item.id)),
+    },
+  });
+
+  return {
+    status: "updated" as const,
+    imageId: input.imageId,
+    inventory: updatedInventory,
+    removedItemIds: [...matchingItemIds],
+    message: `Removed ${matchingItemIds.size} scanned inventory item${matchingItemIds.size === 1 ? "" : "s"} matching ${input.name}`,
+  };
 }

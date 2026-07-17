@@ -1174,6 +1174,10 @@ input[type="file"] {
   padding: 12px;
 }
 
+.ff-chat-field-shell {
+  position: relative;
+}
+
 .ff-chat-field {
   display: block;
   box-sizing: border-box;
@@ -1190,9 +1194,64 @@ input[type="file"] {
   line-height: 20px;
 }
 
+.ff-chat-field::placeholder {
+  color: transparent;
+}
+
 .ff-chat-field:focus-visible {
   outline: 2px solid #2d641b;
   outline-offset: 2px;
+}
+
+.ff-chat-placeholder {
+  position: absolute;
+  top: 13px;
+  right: 64px;
+  left: 13px;
+  min-height: 40px;
+  pointer-events: none;
+  color: #68736a;
+  font-size: 13.3333px;
+  line-height: 20px;
+}
+
+.ff-chat-placeholder__text {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.ff-chat-placeholder__text--current {
+  opacity: 1;
+}
+
+.ff-chat-placeholder__text--incoming {
+  animation: ff-chat-placeholder-fade-in 500ms ease both;
+}
+
+.ff-chat-placeholder__text--previous {
+  animation: ff-chat-placeholder-fade-out 500ms ease both;
+}
+
+@keyframes ff-chat-placeholder-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ff-chat-placeholder-fade-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
 }
 
 .ff-chat-submit {

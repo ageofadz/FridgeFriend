@@ -71,6 +71,27 @@ export const IntentResponseSchema = z.object({
   enrichment: EnrichmentRequirementSchema.optional().default({ itemNames: [], fields: [] }),
   memoryUpdateRequested: z.boolean().optional().default(false),
 });
+export type IntentResponse = z.infer<typeof IntentResponseSchema>;
+
+export const IntentRoutingChoiceSchema = z.object({
+  intent: QueryIntentSchema,
+  score: z.number().finite(),
+  margin: z.number().finite(),
+  example: z.object({
+    intent: QueryIntentSchema,
+    text: z.string().trim().min(1),
+    recipeContinuation: z.boolean().optional(),
+    shoppingMode: ShoppingModeSchema.optional(),
+    enrichment: EnrichmentRequirementSchema.optional(),
+    memoryUpdateRequested: z.boolean().optional(),
+  }),
+});
+export type IntentRoutingChoice = z.infer<typeof IntentRoutingChoiceSchema>;
+
+export type IntentEmbeddingRoutingResult = {
+  accepted: IntentResponse | null;
+  candidates: IntentRoutingChoice[];
+};
 
 export const IntentResponseProviderSchema = {
   type: "object",
@@ -451,6 +472,7 @@ export type QueryGraphDependencies = {
   persistMemoryValidations?: (input: {
     userId: string;
     fridgeId: string;
+    imageId: string | null;
     validations: MemoryValidationResult[];
   }) => Array<{
     result: MemoryWriteResult;
@@ -460,6 +482,9 @@ export type QueryGraphDependencies = {
     semanticMemory: SemanticMemory | null;
   }>>;
   indexSemanticMemory?: (memory: SemanticMemory) => Promise<void>;
+  intentEmbeddingRouter?: (input: {
+    query: string;
+  }) => IntentResponse | IntentEmbeddingRoutingResult | null | Promise<IntentResponse | IntentEmbeddingRoutingResult | null>;
   intentModel?: FridgeFriendChatModel;
   seededInventoryAssertionModel?: FridgeFriendChatModel;
   applySeededInventoryAssertions?: (input: {

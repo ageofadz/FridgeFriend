@@ -8,8 +8,13 @@ import {
   GENERAL_MODEL,
   INTENT_ROUTING_TIMEOUT_MS,
 } from "../../../../../app/server/query/services/query-model.server";
-import type { QueryGraphDependencies } from "../../../../../app/server/query/schemas/query";
+import type {
+  IntentRoutingChoice,
+  QueryGraphDependencies,
+  QueryIntent,
+} from "../../../../../app/server/query/schemas/query";
 import type { FridgeQueryStateValue } from "../../../../../app/server/query/state";
+import { QUERY_INTENTS } from "../../../../../app/workspace/query-events";
 
 function recipeSearchProfile() {
   return {
@@ -49,6 +54,32 @@ function state(overrides: Partial<FridgeQueryStateValue> = {}) {
   } as FridgeQueryStateValue;
 }
 
+function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
+  const intent = typeof result === "object" &&
+    result !== null &&
+    "intent" in result &&
+    typeof result.intent === "string" &&
+    QUERY_INTENTS.includes(result.intent as QueryIntent)
+    ? result.intent as QueryIntent
+    : "inventory";
+  const intents = [
+    intent,
+    "recipe",
+    "organization",
+    "inventory",
+  ].filter((candidate, index, candidates) => candidates.indexOf(candidate) === index).slice(0, 3) as QueryIntent[];
+
+  return intents.map((candidate, index) => ({
+    intent: candidate,
+    score: 0.9 - index * 0.1,
+    margin: 0.1,
+    example: {
+      intent: candidate,
+      text: `${candidate} example`,
+    },
+  }));
+}
+
 function deps(
   result: unknown,
   capture?: (messages: unknown, options: unknown) => void,
@@ -59,7 +90,7 @@ function deps(
         name: "intent-routing",
         ref: "test:intent-routing",
         prompt: ChatPromptTemplate.fromMessages([
-          ["system", "recipe: cooking ideas, meal planning, recipe recommendations, recipe details, or additional options from a previous recipe result set.\nChoose organization when the user asks how to arrange, reorganize, store, group, or make the fridge more efficient.\nChoose space only when the user asks about capacity or fit without asking for an arrangement plan."],
+          ["system", "Route a message to exactly one intent. {{intent_routing_choice_1}} {{intent_routing_choice_2}} {{intent_routing_choice_3}} Set enrichment.itemNames and enrichment.fields only when a missing inventory detail could materially change the answer. Fields are identity, quantity, fill_level, expiration_date, and opened. Leave both arrays empty when the coarse inventory is sufficient."],
           ["human", "{{intent_routing_context_json}}"],
         ], { templateFormat: "mustache" }),
       },
@@ -72,6 +103,10 @@ function deps(
         },
       }),
     } as unknown as FridgeFriendChatModel,
+    intentEmbeddingRouter: async () => ({
+      accepted: null,
+      candidates: intentChoicesForResult(result),
+    }),
   };
 }
 
@@ -102,7 +137,7 @@ describe("determine intent node", () => {
         recipeContinuation: true,
       },
     });
-    expect(String(messages[0].content)).toContain("additional options from a previous recipe result set");
+    expect(String(messages[0].content)).toContain("recipe recommendations/ details, or options from a previous recipe set");
     expect(payload.priorRecipeSearch).toMatchObject({
       semanticQuery: "fridge recipes",
       useAvailableIngredients: true,
@@ -135,6 +170,148 @@ describe("determine intent node", () => {
       context: {
         intentRouting: {
           recipeContinuation: true,
+        },
+      },
+    });
+  });
+
+  it("routes selected item detail requests without model classification", async () => {
+    let modelCalls = 0;
+    const node = createDetermineIntentNode(deps(
+      { intent: "recipe" },
+      () => {
+        modelCalls += 1;
+      },
+    ));
+
+    const result = await node(state({
+      query: "Get more detail about this.",
+      context: {
+        conversationContext: {
+          selectedItemIds: ["milk"],
+          selectedZoneIds: [],
+          selectedRecipeId: null,
+          seededItems: [{
+            itemId: "milk",
+            imageId: "image-1",
+            cropId: "crop:milk",
+            userSeeded: true,
+          }],
+        },
+      },
+    }));
+
+    expect(modelCalls).toBe(0);
+    expect(result).toMatchObject({
+      intent: "inventory",
+      context: {
+        intentRouting: {
+          recipeContinuation: false,
+          shoppingMode: "direct",
+          enrichment: {
+            itemNames: ["milk"],
+            fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
+          },
+          memoryUpdateRequested: false,
+        },
+      },
+    });
+  });
+
+  it("uses high-confidence embedding routing before model classification", async () => {
+    let modelCalls = 0;
+    const node = createDetermineIntentNode({
+      ...deps(
+        { intent: "inventory" },
+        () => {
+          modelCalls += 1;
+        },
+      ),
+      intentEmbeddingRouter: async () => ({
+        intent: "shopping",
+        recipeContinuation: false,
+        shoppingMode: "grocery_planner",
+        enrichment: { itemNames: [], fields: [] },
+        memoryUpdateRequested: false,
+      }),
+    });
+
+    const result = await node(state({ query: "Make a grocery list for tacos." }));
+
+    expect(modelCalls).toBe(0);
+    expect(result).toMatchObject({
+      intent: "shopping",
+      context: {
+        intentRouting: {
+          shoppingMode: "grocery_planner",
+        },
+      },
+    });
+  });
+
+  it("uses model classification when embedding routing is unresolved", async () => {
+    let modelCalls = 0;
+    const node = createDetermineIntentNode(deps(
+      { intent: "organization", enrichment: { itemNames: [], fields: [] } },
+      () => {
+        modelCalls += 1;
+      },
+    ));
+
+    const result = await node(state({ query: "Can you help with this?" }));
+
+    expect(modelCalls).toBe(1);
+    expect(result).toMatchObject({
+      intent: "organization",
+    });
+  });
+
+  it("limits model intent choices to the top three embedding candidates", async () => {
+    let capturedMessages: unknown;
+    let capturedSchema: unknown;
+    const node = createDetermineIntentNode({
+      ...deps(
+        { intent: "shopping", enrichment: { itemNames: [], fields: [] } },
+        (messages) => {
+          capturedMessages = messages;
+        },
+      ),
+      intentEmbeddingRouter: async () => ({
+        accepted: null,
+        candidates: [
+          { intent: "shopping", score: 0.81, margin: 0.04, example: { intent: "shopping", text: "shopping example" } },
+          { intent: "recipe", score: 0.77, margin: 0.03, example: { intent: "recipe", text: "recipe example" } },
+          { intent: "inventory", score: 0.74, margin: 0.02, example: { intent: "inventory", text: "inventory example" } },
+        ],
+      }),
+      intentModel: {
+        withStructuredOutput: (schema: unknown) => {
+          capturedSchema = schema;
+          return {
+            invoke: async (messages: unknown, options: unknown) => {
+              capturedMessages = messages;
+              expect(options).toBeDefined();
+              return { intent: "shopping", enrichment: { itemNames: [], fields: [] }, memoryUpdateRequested: false };
+            },
+          };
+        },
+      } as unknown as FridgeFriendChatModel,
+    });
+
+    await expect(node(state({ query: "What am I missing for dinner?" }))).resolves.toMatchObject({
+      intent: "shopping",
+    });
+
+    const messages = capturedMessages as Array<{ content: unknown }>;
+    const systemPrompt = String(messages[0].content);
+    expect(systemPrompt).toContain("shopping: groceries, restocking, replacements, missing ingredients.");
+    expect(systemPrompt).toContain("recipe: cooking ideas, meal planning, recipe recommendations/ details, or options from a previous recipe set.");
+    expect(systemPrompt).toContain("inventory: current recorded food inventory, quantities, locations, or visible item facts.");
+    expect(systemPrompt).not.toContain("space: physical storage fit or shelf capacity");
+    expect(capturedSchema).toMatchObject({
+      properties: {
+        intent: {
+          enum: ["shopping", "recipe", "inventory"],
         },
       },
     });
@@ -192,7 +369,7 @@ describe("determine intent node", () => {
     });
   });
 
-  it("instructs the model to route fridge arrangement efficiency requests to organization", async () => {
+  it("instructs the model with the selected organization choice", async () => {
     let capturedMessages: unknown;
     const node = createDetermineIntentNode(deps(
       { intent: "organization", enrichment: { itemNames: [], fields: [] } },
@@ -207,8 +384,8 @@ describe("determine intent node", () => {
 
     const messages = capturedMessages as Array<{ content: unknown }>;
     const systemPrompt = String(messages[0].content);
-    expect(systemPrompt).toContain("Choose organization when the user asks how to arrange, reorganize, store, group, or make the fridge more efficient.");
-    expect(systemPrompt).toContain("Choose space only when the user asks about capacity or fit without asking for an arrangement plan.");
+    expect(systemPrompt).toContain("organization: arranging, reorganizing, improving storage efficiency, grouping, moving inventory.");
+    expect(systemPrompt).not.toContain("space: physical storage fit or shelf capacity");
   });
 
   it("accepts general chat as a non-clarification route", async () => {

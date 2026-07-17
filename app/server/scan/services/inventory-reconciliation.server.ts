@@ -263,9 +263,18 @@ function createLocation(
     return resolveBaseZone(placementByDetectionId.get(candidate.supportId), seen);
   }
 
-  const zone = resolveBaseZone(placement);
+  function resolveDepthBackRatio(candidate: GroundedPlacementValue | undefined, seen = new Set<string>()): number | null {
+    if (!candidate || candidate.status !== "placed") return null;
+    if (candidate.supportKind === "zone") return candidate.depth.back;
+    if (seen.has(candidate.supportId)) return null;
+    seen.add(candidate.supportId);
+    return resolveDepthBackRatio(placementByDetectionId.get(candidate.supportId), seen);
+  }
 
-  if (!placement || placement.status !== "placed" || !zone) {
+  const zone = resolveBaseZone(placement);
+  const depthBackRatio = resolveDepthBackRatio(placement);
+
+  if (!placement || placement.status !== "placed" || !zone || depthBackRatio === null) {
     return {
       status: "needs_review",
       zoneId: null,
@@ -279,7 +288,7 @@ function createLocation(
     status: "matched",
     zoneId: zone.id,
     zoneType: zone.type,
-    observations: [observation(placement.depth.back)],
+    observations: [observation(depthBackRatio)],
     confidence: placement.confidence,
   };
 }

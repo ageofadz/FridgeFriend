@@ -113,4 +113,33 @@ describe("chat persistence", () => {
       expect.objectContaining({ id: assistantMessageId, status: "running", payload: { text: "How many eggs are left?" } }),
     ]));
   }));
+
+  it("keeps latest chat selection scoped to the selected image", () => withTestDatabase(() => {
+    const firstImageChat = createChat(scope);
+    const secondImageScope = { ...scope, imageId: "image-2" };
+    const fridgeWideScope = { ...scope, imageId: null };
+    const secondImageChat = createChat(secondImageScope);
+    const fridgeWideChat = createChat(fridgeWideScope);
+
+    const userMessageId = randomUUID();
+    const assistantMessageId = randomUUID();
+    startChatTurn({
+      ...secondImageScope,
+      threadId: secondImageChat.id,
+      userMessage: { id: userMessageId, role: "user", payload: { text: "What is in this image?" } },
+      assistantMessage: { id: assistantMessageId, role: "assistant", payload: { text: "" } },
+    });
+    updateChatAssistantMessage({
+      ...secondImageScope,
+      threadId: secondImageChat.id,
+      assistantMessageId,
+      payload: { text: "This image has spinach." },
+      status: "idle",
+    });
+
+    expect(getOrCreateLatestChat(scope).id).toBe(firstImageChat.id);
+    expect(getOrCreateLatestChat(secondImageScope).id).toBe(secondImageChat.id);
+    expect(getOrCreateLatestChat(fridgeWideScope).id).toBe(fridgeWideChat.id);
+    expect(() => getChat(secondImageChat.id, scope)).toThrow(/was not found for this fridge/);
+  }));
 });

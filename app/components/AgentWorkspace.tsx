@@ -84,6 +84,14 @@ type DrawState = {
   start: { x: number; y: number };
   current: { x: number; y: number };
 };
+type SeedBoundingBoxResponse = {
+  status: "known_item" | "created_item";
+  cropId: string;
+  item: InventoryItem;
+  inventory: Inventory;
+  draftText: string;
+  error?: string;
+};
 function isStorageWorkspaceLocation(candidate: WorkspaceLocation): candidate is StorageImageLocation {
   return STORAGE_IMAGE_LOCATIONS.includes(candidate as StorageImageLocation);
 }
@@ -672,24 +680,77 @@ export function AgentWorkspace({
     };
   }
 
-  function seedBoundingBox(boundingBox: NormalizedBoundingBox) {
+  async function readSeedBoundingBoxResponse(response: Response) {
+    let payload: unknown;
+
+    try {
+      payload = await response.json();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Seed bounding box response was not valid JSON: ${message}`);
+    }
+
+    const result = payload as Partial<SeedBoundingBoxResponse>;
+
+    if (!response.ok) {
+      throw new Error(result.error ?? `Seed bounding box request failed with HTTP ${response.status}`);
+    }
+
+    if (
+      (result.status !== "known_item" && result.status !== "created_item") ||
+      typeof result.cropId !== "string" ||
+      typeof result.draftText !== "string" ||
+      !result.item ||
+      !result.inventory
+    ) {
+      throw new Error("Seed bounding box response did not include the saved inventory item");
+    }
+
+    return result as SeedBoundingBoxResponse;
+  }
+
+  async function seedBoundingBox(boundingBox: NormalizedBoundingBox) {
     if (!currentImage) {
       throw new Error(`Cannot seed bounding box because there is no ${location} image selected`);
     }
 
+    const sourceImageId = currentImage.id;
     setBboxToolError(null);
-    setBboxToolStatus("ready");
-    const seed = {
-      imageId: currentImage.id,
-      cropId: `user-drawn-bbox:${currentImage.id}:${crypto.randomUUID()}`,
-      boundingBox,
-      userSeeded: true,
-    } satisfies ConversationContext["seededBoundingBoxes"][number];
-    setSeededBoundingBoxes([seed]);
-    setSelection({ itemIds: [], source: "user" });
-    setFocus(emptyWorkspaceFocus());
-    setHoveredItemId(null);
-    setDraftRequest({ id: crypto.randomUUID(), text: "Create inventory item(s) from this selected area." });
+    setBboxToolStatus("saving");
+
+    try {
+      const response = await fetch("/api/seed-bbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageId: sourceImageId, boundingBox }),
+      });
+      const result = await readSeedBoundingBoxResponse(response);
+      const seed = {
+        itemId: result.item.id,
+        imageId: sourceImageId,
+        cropId: result.cropId,
+        userSeeded: true,
+      } satisfies ConversationContextSeededItem;
+
+      onInventoryUpdated(result.inventory);
+      setSeededItems([seed]);
+      setSeededBoundingBoxes([]);
+      setSeededLabels((current) => ({
+        ...current,
+        [result.cropId]: inventoryItemDisplayName(result.item),
+      }));
+      setSelection({ itemIds: [result.item.id], source: "user" });
+      setFocus({ mode: "item", itemIds: [result.item.id], zoneIds: [], recipeId: null, emphasis: "highlight", reason: null });
+      setHoveredItemId(null);
+      if (result.draftText.trim().length > 0) {
+        setDraftRequest({ id: crypto.randomUUID(), text: result.draftText });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setBboxToolError(message);
+    } finally {
+      setBboxToolStatus("ready");
+    }
   }
 
   const seedInventoryItem = useCallback((item: InventoryItem) => {
@@ -1104,6 +1165,7 @@ export function AgentWorkspace({
             setLocation("grocery_list");
           }}
           onOpenGroceryList={() => setLocation("grocery_list")}
+          onInventoryUpdated={onInventoryUpdated}
           onOrganizationPlanCompleted={(updatedInventory) => {
             setOrganizationAnimationId((current) => current + 1);
             onInventoryUpdated(updatedInventory);

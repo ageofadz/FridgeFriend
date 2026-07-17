@@ -128,6 +128,35 @@ describe("smart pantry completion node", () => {
     ]);
   });
 
+  it("uses fuzzy ingredient names when building pantry completion bundles", async () => {
+    const result = await createPlanPantryCompletionNode(deps({
+      assignments: [{ ingredient: "tortilla", aisle: "bakery" }],
+    }))(state([
+      candidate("one", ["corn tortillas", "tortillas"], 0.8),
+      candidate("two", ["tortillas"], 0.7),
+      candidate("three", ["corn tortillas"], 0.6),
+    ]));
+
+    const plan = result.context?.pantryCompletionPlan as {
+      unlockedRecipeCount: number;
+      suggestions: Array<{ ingredient: string; recipeIds: string[] }>;
+      unlockedRecipes: Array<{ suggestedIngredients: string[] }>;
+    };
+    expect(plan.unlockedRecipeCount).toBe(3);
+    expect(plan.suggestions).toEqual([{
+      ingredient: "tortilla",
+      aisle: "bakery",
+      recipeIds: ["one", "two", "three"],
+      recipeNames: ["Recipe one", "Recipe two", "Recipe three"],
+      supportingRecipeCount: 3,
+    }]);
+    expect(plan.unlockedRecipes.map((recipe) => recipe.suggestedIngredients)).toEqual([
+      ["tortilla"],
+      ["tortilla"],
+      ["tortilla"],
+    ]);
+  });
+
   it("chooses the bundle that unlocks the most recipes instead of the most common single missing ingredient", async () => {
     const garlicDecoys = Array.from({ length: 10 }, (_entry, index) =>
       candidate(`garlic-decoy-${index}`, ["garlic", `specific item ${index}`], 0.9)
@@ -150,18 +179,25 @@ describe("smart pantry completion node", () => {
     expect(plan.suggestions.map((suggestion) => suggestion.ingredient)).toEqual(["ginger", "onion"]);
   });
 
-  it("returns actionable clarification when fewer than three relevant recipes share a pantry bundle", async () => {
-    const result = await createPlanPantryCompletionNode(deps({ assignments: [] }))(state([
+  it("returns the best available bundle when fewer than three relevant recipes share a pantry bundle", async () => {
+    const result = await createPlanPantryCompletionNode(deps({
+      assignments: [{ ingredient: "garlic", aisle: "produce" }],
+    }))(state([
       candidate("one", ["garlic"], 0.8),
       ...Array.from({ length: 19 }, (_entry, index) =>
         candidate(`wide-${index}`, [`wide a ${index}`, `wide b ${index}`, `wide c ${index}`, `wide d ${index}`], 0.5)
       ),
     ]));
 
-    expect(result.context?.pantryCompletionPlan).toBeNull();
+    expect(result.context?.pantryCompletionPlan).toMatchObject({
+      eligibleRecipeCount: 20,
+      unlockedRecipeCount: 1,
+      suggestions: [{ ingredient: "garlic", recipeIds: ["one"], supportingRecipeCount: 1 }],
+      unlockedRecipes: [{ id: "one", name: "Recipe one", suggestedIngredients: ["garlic"] }],
+    });
     expect(result.context?.pantryCompletionError).toBeNull();
-    expect(result.context?.pantryCompletionClarification).toBe("I found fewer than three relevant recipes for one pantry bundle. Try broadening the recipe category or adding more pantry items.");
-    expect(result.context?.pantryCompletionFailureReason).toBe("The best pantry bundle unlocked 1 of 1 structurally eligible recipes.");
+    expect(result.context?.pantryCompletionClarification).toBeNull();
+    expect(result.context?.pantryCompletionFailureReason).toBeNull();
   });
 
   it("returns actionable clarification when no relevant recipe needs one to three additions", async () => {

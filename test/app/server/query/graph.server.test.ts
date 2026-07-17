@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isVisibleResponseMessageMetadata,
+  resumeQueryForFridgeImage,
   runQueryForFridgeImage,
   streamQueryForFridgeImage,
 } from "../../../../app/server/query/graph.server";
@@ -17,6 +18,7 @@ import { shouldExtractMemoryCandidates } from "../../../../app/server/query/node
 import type { FridgeQueryStateValue } from "../../../../app/server/query/state";
 import {
   QUERY_VISIBLE_RESPONSE_TAG,
+  type IntentRoutingChoice,
   type QueryGraphDependencies,
   type QueryIntent,
   type QueryStreamEvent,
@@ -178,6 +180,31 @@ function createStructuredModel(result: unknown) {
   } as unknown as FridgeFriendChatModel;
 }
 
+function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
+  const intent = typeof result === "object" &&
+    result !== null &&
+    "intent" in result &&
+    typeof result.intent === "string"
+    ? result.intent as QueryIntent
+    : "inventory";
+  const intents = [
+    intent,
+    "recipe",
+    "organization",
+    "inventory",
+  ].filter((candidate, index, candidates) => candidates.indexOf(candidate) === index).slice(0, 3) as QueryIntent[];
+
+  return intents.map((candidate, index) => ({
+    intent: candidate,
+    score: 0.9 - index * 0.1,
+    margin: 0.1,
+    example: {
+      intent: candidate,
+      text: `${candidate} example`,
+    },
+  }));
+}
+
 function testPromptBundle(): NonNullable<QueryGraphDependencies["promptBundle"]> {
   return {
     queryMemoryExtraction: {
@@ -220,6 +247,26 @@ function testPromptBundle(): NonNullable<QueryGraphDependencies["promptBundle"]>
       name: PromptName.IntentRouting,
       ref: "fridgefriend-intent-routing:latest",
       prompt: ChatPromptTemplate.fromMessages([["human", "{{intent_routing_context_json}}"]], { templateFormat: "mustache" }),
+    },
+    seededInventoryAssertions: {
+      name: PromptName.SeededInventoryAssertions,
+      ref: "fridgefriend-seeded-inventory-assertions:latest",
+      prompt: ChatPromptTemplate.fromMessages([["human", "{{seeded_inventory_assertion_context_json}}"]], { templateFormat: "mustache" }),
+    },
+    focusedInventoryEnrichment: {
+      name: PromptName.FocusedInventoryEnrichment,
+      ref: "fridgefriend-focused-inventory-enrichment:latest",
+      prompt: ChatPromptTemplate.fromMessages([["human", "{{focused_inventory_enrichment_context_json}}"]], { templateFormat: "mustache" }),
+    },
+    inventoryClarificationUser: {
+      name: PromptName.InventoryClarificationUser,
+      ref: "fridgefriend-inventory-clarification-user:latest",
+      prompt: ChatPromptTemplate.fromMessages([["human", "{{inventory_clarification_context_json}}"]], { templateFormat: "mustache" }),
+    },
+    inventoryClarificationInference: {
+      name: PromptName.InventoryClarificationInference,
+      ref: "fridgefriend-inventory-clarification-inference:latest",
+      prompt: ChatPromptTemplate.fromMessages([["human", "{{inventory_clarification_context_json}}"]], { templateFormat: "mustache" }),
     },
     queryResponse: {
       name: PromptName.QueryResponse,
@@ -277,6 +324,10 @@ function fakeDeps(input: {
       }),
     },
     loadMemoryContext: () => input.memoryContext ?? emptyMemoryContext(),
+    intentEmbeddingRouter: async () => ({
+      accepted: null,
+      candidates: intentChoicesForResult(input.intentResult ?? { intent: input.intent ?? "inventory" }),
+    }),
     persistMemoryValidations: async ({ validations }) =>
       validations.map((validation) => ({
         result: {
@@ -382,7 +433,7 @@ describe("query graph streaming", () => {
     });
   });
 
-  it("streams pantry-completion clarification instead of a retrieval error when fewer than three relevant completions exist", async () => {
+  it("streams pantry completion when fewer than three relevant completions exist", async () => {
     const recipes = [
       createRecipe({ id: "one", name: "Garlic chicken", ingredients: ["chicken", "garlic"] }),
       createRecipe({ id: "two", name: "Ginger chicken", ingredients: ["chicken", "ginger"] }),
@@ -422,22 +473,29 @@ describe("query graph streaming", () => {
           })),
           getRecipesByIds: () => recipes,
           listFoodComTags: () => [],
+          groceryAisleAssignmentModel: createStructuredModel({
+            assignments: [
+              { ingredient: "garlic", aisle: "produce" },
+              { ingredient: "ginger", aisle: "produce" },
+            ],
+          }),
         },
       }),
     )) {
       events.push(event);
     }
 
-    expect(events.find((event) => event.type === "pantry_completion_clarification")).toEqual({
-      type: "pantry_completion_clarification",
-      message: "I found fewer than three relevant recipes for one pantry bundle. Try broadening the recipe category or adding more pantry items.",
+    expect(events.find((event) => event.type === "pantry_completion")).toMatchObject({
+      type: "pantry_completion",
+      plan: { unlockedRecipeCount: 2 },
     });
+    expect(events.some((event) => event.type === "pantry_completion_clarification")).toBe(false);
     expect(events.some((event) => event.type === "pantry_completion_error")).toBe(false);
     expect(events.at(-1)).toMatchObject({
       type: "final",
-      pantryCompletionPlan: undefined,
+      pantryCompletionPlan: { unlockedRecipeCount: 2 },
       pantryCompletionError: undefined,
-      pantryCompletionClarification: "I found fewer than three relevant recipes for one pantry bundle. Try broadening the recipe category or adding more pantry items.",
+      pantryCompletionClarification: undefined,
     });
   });
 
@@ -2324,6 +2382,164 @@ describe("query graph streaming", () => {
     });
     expect(events.some((event) => event.type === "final")).toBe(false);
   });
+
+  it("runs inventory intent through mutation extraction before answering", async () => {
+    setLangSmithEnv();
+
+    const events: QueryStreamEvent[] = [];
+
+    for await (const event of streamQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "Delete the carrots",
+        threadId: `test-${randomUUID()}`,
+      },
+      fakeDeps({
+        intentResult: {
+          intent: "inventory",
+          recipeContinuation: false,
+          shoppingMode: "direct",
+          enrichment: { itemNames: [], fields: [] },
+          memoryUpdateRequested: false,
+        },
+        memoryCandidates: [
+          {
+            kind: "inventory_item",
+            scope: "fridge",
+            action: "remove",
+            name: "carrots",
+            storageLocation: "fridge",
+            quantity: null,
+            notes: null,
+            explicit: true,
+          },
+        ],
+        overrides: {
+          persistMemoryValidations: undefined,
+        },
+      }),
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual({
+      type: "inventory_mutation_review",
+      operation: "remove",
+      itemName: "carrots",
+      storageLocation: "fridge",
+    });
+    expect(events.some((event) => event.type === "final")).toBe(false);
+  });
+
+  it("deletes approved inventory removals from the active scanned inventory", async () => {
+    await withTestDatabase(async () => {
+      setLangSmithEnv();
+
+      const image = createFridgeImage({
+        dataUrl: createJpegDataUrl(),
+        originalName: "carrots.jpg",
+        storageLocation: "fridge",
+        baseImageId: null,
+      });
+
+      saveFridgeInventory({
+        imageId: image.id,
+        inventory: createInventory({
+          item: {
+            id: "carrots-1",
+            name: "carrot",
+            label: "Baby carrots",
+            cat: "produce",
+            pack: "bag",
+          },
+        }),
+      });
+
+      const threadId = `test-${randomUUID()}`;
+      const firstEvents: QueryStreamEvent[] = [];
+
+      for await (const event of streamQueryForFridgeImage(
+        {
+          fridgeId: "fridge-1",
+          imageId: image.id,
+          query: "Delete the carrots",
+          threadId,
+        },
+        fakeDeps({
+          intentResult: {
+            intent: "inventory",
+            recipeContinuation: false,
+            shoppingMode: "direct",
+            enrichment: { itemNames: [], fields: [] },
+            memoryUpdateRequested: false,
+          },
+          memoryCandidates: [
+            {
+              kind: "inventory_item",
+              scope: "fridge",
+              action: "remove",
+              name: "carrots",
+              storageLocation: "fridge",
+              quantity: null,
+              notes: null,
+              explicit: true,
+            },
+          ],
+          overrides: {
+            loadInventoryForImage: getFridgeInventoryForImage,
+            persistMemoryValidations: undefined,
+          },
+        }),
+      )) {
+        firstEvents.push(event);
+      }
+
+      expect(firstEvents).toContainEqual({
+        type: "inventory_mutation_review",
+        operation: "remove",
+        itemName: "carrots",
+        storageLocation: "fridge",
+      });
+      expect(getFridgeInventoryForImage(image.id)?.items.map((item) => item.name)).toEqual(["carrot"]);
+
+      const resumedEvents: QueryStreamEvent[] = [];
+
+      for await (const event of resumeQueryForFridgeImage(
+        {
+          threadId,
+          resume: {
+            answers: {},
+            skipped: [],
+            inventoryMutationReview: { approved: true },
+          },
+        },
+        fakeDeps({
+          overrides: {
+            loadInventoryForImage: getFridgeInventoryForImage,
+            persistMemoryValidations: undefined,
+            responseModel: {
+              invoke: async () => new AIMessage("Removed carrots from the inventory."),
+            } as unknown as FridgeFriendChatModel,
+          },
+        }),
+      )) {
+        resumedEvents.push(event);
+      }
+
+      const updated = getFridgeInventoryForImage(image.id);
+      const inventoryUpdatedEvent = resumedEvents.find((event): event is Extract<QueryStreamEvent, { type: "inventory_updated" }> =>
+        event.type === "inventory_updated"
+      );
+
+      expect(updated?.items).toEqual([]);
+      expect(inventoryUpdatedEvent?.inventory).toMatchObject({ items: [] });
+      expect(resumedEvents.at(-1)).toMatchObject({
+        type: "final",
+        answer: "Removed carrots from the inventory.",
+      });
+    });
+  }, 10000);
 
   it("skips memory extraction for plain recipe questions", async () => {
     setLangSmithEnv();

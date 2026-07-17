@@ -38,6 +38,8 @@ describe("chat model provider boundary", () => {
     expect(model).toBeInstanceOf(ChatGoogleGenerativeAI);
     expect((model as ChatGoogleGenerativeAI).temperature).toBe(0);
     expect((model as ChatGoogleGenerativeAI).maxOutputTokens).toBe(CHAT_MAX_OUTPUT_TOKENS);
+    expect((model as ChatGoogleGenerativeAI).streaming).toBe(false);
+    expect((model as ChatGoogleGenerativeAI).disableStreaming).toBe(true);
   });
 
   it("rejects unsupported chat providers", () => {

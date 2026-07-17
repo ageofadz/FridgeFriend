@@ -1,16 +1,10 @@
 node_modules
 build
 .react-router
-.data/*
-!.data/fridgefriend.sqlite
-!.data/demo-corpus.seed.json
-!.data/chroma/
-!.data/chroma/**
+.data
 .env*
 .git
 .github
-compose.yaml
-compose.local.yaml
 *.log
 *.md
 **/*.md

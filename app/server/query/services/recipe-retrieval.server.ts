@@ -4,6 +4,10 @@ import {
   selectUsefulTags,
 } from "../../recipes/normalization";
 import { isUniversalBasicIngredient } from "../../recipes/pantry-basics";
+import {
+  fuzzyDeduplicateIngredientNames,
+  ingredientNamesAreSimilar,
+} from "./ingredient-string-match.server";
 import type { Recipe, RecipeCandidate } from "../../recipes/types";
 import type {
   DietaryPreferenceMemory,
@@ -135,8 +139,8 @@ function matchesAvailableIngredient(recipeIngredient: string, availableIngredien
         return true;
       }
       const [base] = availableName.split(" ");
-      return availableName === base && GENERALIZABLE_BASE_INGREDIENTS.has(base) &&
-        recipeIngredient.startsWith(`${base} `);
+      return (availableName === base && GENERALIZABLE_BASE_INGREDIENTS.has(base) && recipeIngredient.startsWith(`${base} `)) ||
+        ingredientNamesAreSimilar(recipeIngredient, availableName);
     }));
 }
 
@@ -357,7 +361,10 @@ export function rankRecipeCandidates(input: {
       hardFilterRejections += 1;
       continue;
     }
-    const ingredients = [...new Set(recipe.ingredients.map((ingredient) => normalizeIngredientName(ingredient.canonicalName)).filter(Boolean))];
+    const ingredients = fuzzyDeduplicateIngredientNames(
+      recipe.ingredients.map((ingredient) => ingredient.canonicalName),
+      { allowUniversalBasicOverlap: true },
+    );
     const matchedIngredients = ingredients.filter((ingredient) => matchesAvailableIngredient(ingredient, availableIngredients));
     const matchedRequestedIngredients = requestedIngredientMatches(ingredients, requestedIngredients);
     const missingIngredients = ingredients

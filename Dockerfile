@@ -10,9 +10,7 @@ FROM dependencies AS build
 
 COPY app ./app
 COPY scripts ./scripts
-COPY demo-corpus/recipes.json ./demo-corpus/recipes.json
-COPY .data/fridgefriend.sqlite .data/demo-corpus.seed.json ./prebuilt-data/
-COPY .data/chroma ./prebuilt-data/chroma
+COPY demo-corpus ./demo-corpus
 COPY react-router.config.ts tsconfig.json vite.config.ts ./
 
 RUN npm run build
@@ -30,7 +28,6 @@ COPY --from=build /app/build ./build
 COPY --from=build /app/app ./app
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/demo-corpus ./demo-corpus
-COPY --from=build /app/prebuilt-data ./prebuilt-data
 COPY package.json react-router.config.ts tsconfig.json vite.config.ts ./
 
 RUN find /app -path /app/node_modules -prune -o -type f \( -name "*.md" -o -name ".env" -o -name ".env.*" \) -delete

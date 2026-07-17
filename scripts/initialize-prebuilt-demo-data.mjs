@@ -1,7 +1,7 @@
 import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const sourceDirectory = process.env.PREBUILT_DATA_PATH ?? "/app/prebuilt-data";
+const sourceDirectory = process.env.PREBUILT_DATA_PATH ?? "/app/demo-corpus/prebuilt-data";
 const appDirectory = process.env.DEMO_APP_DATA_PATH ?? "/var/lib/fridgefriend/app";
 const chromaDirectory = process.env.DEMO_CHROMA_DATA_PATH ?? "/var/lib/fridgefriend/chroma";
 const markerName = "demo-corpus.seed.json";

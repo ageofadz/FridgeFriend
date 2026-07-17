@@ -137,6 +137,7 @@ function createHumanMessageContent(input: {
       memoryWriteResults: input.state.context.memoryWriteResults,
       memoryWriteVerification: input.state.context.memoryWriteVerification,
       memoryWriteVerificationError: input.state.context.memoryWriteVerificationError,
+      scannedInventoryMutations: input.state.context.scannedInventoryMutations,
       externalInventory: input.state.externalInventory,
       dietaryRestrictions: input.state.dietaryRestrictions,
       dietaryPreferences: input.state.dietaryPreferences,

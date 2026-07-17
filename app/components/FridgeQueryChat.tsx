@@ -46,6 +46,7 @@ type FridgeQueryChatProps = {
   onGroceryPlan(plan: GroceryPlan): void;
   onAddPantryCompletionItems(items: PantryCompletionSuggestion[]): void;
   onOpenGroceryList(): void;
+  onInventoryUpdated(inventory: Inventory): void;
   onOrganizationPlanCompleted(inventory: Inventory): void;
   onOrganizationPlanRejected(): void;
   onDietaryProfileChange(profile: {
@@ -54,7 +55,7 @@ type FridgeQueryChatProps = {
   }): void;
 };
 
-type ChatMessage = {
+export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
@@ -124,6 +125,20 @@ type MarkdownBlock =
 
 const RECIPE_TOURNAMENT_DISPLAY_LIMIT = 3;
 const LOADING_FOOD_EMOJIS = ["🌽", "🥚", "🍌", "🥩", "🧃", "🍞", "🍒", "🍓", "🥦", "🥬", "🍤", "🥜"] as const;
+export const CHATBOX_EXAMPLE_PROMPTS = [
+  "List the visible drinks in the door...",
+  "How much is left in this selected container...",
+  "What should I use before it goes bad...",
+  "Find quick dinners I can cook from what I have...",
+  "Show more recipe options like those...",
+  "Build a grocery list for three meals this week...",
+  "What pantry staples would unlock more recipes...",
+  "How long is opened yogurt safe to keep...",
+  "Which shelf has room for a tall bottle...",
+  "Make a plan to reorganize the fridge...",
+  "Move the yogurt to the door bin in the inventory...",
+  "Remember that I avoid peanuts and prefer spicy food...",
+] as const;
 
 function chatMessageFromPersisted(message: PersistedChatMessage): ChatMessage {
   const text = message.payload.text;
@@ -143,6 +158,14 @@ function chatMessageFromPersisted(message: PersistedChatMessage): ChatMessage {
 
 function messagesFromChat(chat: PersistedChat) {
   return chat.messages.map(chatMessageFromPersisted);
+}
+
+function chatScopeKey(userId: string, fridgeId: string, imageId: string | null) {
+  return JSON.stringify([userId, fridgeId, imageId]);
+}
+
+function persistedChatScopeKey(chat: PersistedChat) {
+  return chatScopeKey(chat.userId, chat.fridgeId, chat.imageId);
 }
 
 function createAssistantMessage(
@@ -202,6 +225,15 @@ export function hasAssistantResponseContent(message: ChatMessage) {
     message.organizationPlan !== undefined ||
     (message.visualEvidence?.length ?? 0) > 0
   );
+}
+
+export function withoutHitlLoadingState(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    text: "",
+    statusLines: undefined,
+    streaming: false,
+  };
 }
 
 export function finalAssistantMessageText(
@@ -1159,6 +1191,7 @@ export function FridgeQueryChat({
   onGroceryPlan,
   onAddPantryCompletionItems,
   onOpenGroceryList,
+  onInventoryUpdated,
   onOrganizationPlanCompleted,
   onOrganizationPlanRejected,
   onDietaryProfileChange,
@@ -1171,6 +1204,9 @@ export function FridgeQueryChat({
   }));
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const placeholderIndexRef = useRef(0);
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  const [previousPlaceholderIndex, setPreviousPlaceholderIndex] = useState<number | null>(null);
   const [status, setStatus] = useState<"ready" | "submitted" | "error">(
     "ready",
   );
@@ -1181,10 +1217,15 @@ export function FridgeQueryChat({
   const [mutationReview, setMutationReview] = useState<InventoryMutationReview | null>(null);
   const [threadId, setThreadId] = useState(initialChat.id);
   const [executionStatus, setExecutionStatus] = useState(initialChat.executionStatus);
+  const [loadedChatScopeKey, setLoadedChatScopeKey] = useState(() => persistedChatScopeKey(initialChat));
   const isPending = status === "submitted";
   const foodLoadingEmojis = useMemo(
     () => loadingFoodEmojis(dietaryProfile.dietaryRestrictions, dietaryProfile.dietaryPreferences),
     [dietaryProfile],
+  );
+  const expectedChatScopeKey = useMemo(
+    () => chatScopeKey(userId, fridgeId, imageId),
+    [fridgeId, imageId, userId],
   );
 
   useEffect(() => {
@@ -1192,20 +1233,108 @@ export function FridgeQueryChat({
   }, [dietaryPreferences, dietaryRestrictions]);
 
   useEffect(() => {
-    if (initialChat.id === threadId) {
+    placeholderIndexRef.current = placeholderIndex;
+  }, [placeholderIndex]);
+
+  useEffect(() => {
+    if (input.length > 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      const currentIndex = placeholderIndexRef.current;
+      const nextIndex = (currentIndex + 1) % CHATBOX_EXAMPLE_PROMPTS.length;
+
+      setPreviousPlaceholderIndex(currentIndex);
+      placeholderIndexRef.current = nextIndex;
+      setPlaceholderIndex(nextIndex);
+    }, 3000);
+
+    return () => window.clearInterval(interval);
+  }, [input]);
+
+  useEffect(() => {
+    if (previousPlaceholderIndex === null) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setPreviousPlaceholderIndex(null);
+    }, 600);
+
+    return () => window.clearTimeout(timeout);
+  }, [placeholderIndex, previousPlaceholderIndex]);
+
+  useEffect(() => {
+    const nextChatScopeKey = persistedChatScopeKey(initialChat);
+
+    if (nextChatScopeKey !== expectedChatScopeKey) {
+      return;
+    }
+
+    if (initialChat.id === threadId && nextChatScopeKey === loadedChatScopeKey) {
       return;
     }
 
     setMessages(messagesFromChat(initialChat));
     setThreadId(initialChat.id);
     setExecutionStatus(initialChat.executionStatus);
+    setLoadedChatScopeKey(nextChatScopeKey);
     setStatus("ready");
     setError(null);
     setClarification(null);
     setClarificationAnswers({});
     setSplitReview(null);
     setMutationReview(null);
-  }, [initialChat, threadId]);
+  }, [expectedChatScopeKey, initialChat, loadedChatScopeKey, threadId]);
+
+  useEffect(() => {
+    if (loadedChatScopeKey === expectedChatScopeKey) {
+      return;
+    }
+
+    const abortController = new AbortController();
+
+    async function loadScopedChat() {
+      try {
+        const params = new URLSearchParams({ userId, fridgeId });
+        if (imageId !== null) {
+          params.set("imageId", imageId);
+        }
+        const response = await fetch(`/api/chats?${params.toString()}`, {
+          signal: abortController.signal,
+        });
+        const payload = await response.json() as { chat?: PersistedChat; error?: string };
+
+        if (!response.ok || !payload.chat) {
+          throw new Error(payload.error ?? "Loading the scoped chat did not return a chat thread");
+        }
+
+        setMessages(messagesFromChat(payload.chat));
+        setThreadId(payload.chat.id);
+        setExecutionStatus(payload.chat.executionStatus);
+        setLoadedChatScopeKey(persistedChatScopeKey(payload.chat));
+        setStatus("ready");
+        setError(null);
+        setClarification(null);
+        setClarificationAnswers({});
+        setSplitReview(null);
+        setMutationReview(null);
+      } catch (caughtError) {
+        if (caughtError instanceof DOMException && caughtError.name === "AbortError") {
+          return;
+        }
+
+        const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+        setError(`Loading chat failed: ${message}`);
+        setStatus("error");
+      }
+    }
+
+    void loadScopedChat();
+
+    return () => abortController.abort();
+  }, [expectedChatScopeKey, fridgeId, imageId, loadedChatScopeKey, userId]);
 
   useEffect(() => {
     if (draftRequest) {
@@ -1475,12 +1604,7 @@ export function FridgeQueryChat({
       setClarification(event.questions);
       setClarificationAnswers({});
       releaseChatInput();
-      updateAssistantMessage(messageId, (message) => ({
-        ...message,
-        text: event.questions.map((question) => question.question).join("\n\n"),
-        statusLines: undefined,
-        streaming: false,
-      }));
+      updateAssistantMessage(messageId, withoutHitlLoadingState);
       return;
     }
 
@@ -1488,6 +1612,7 @@ export function FridgeQueryChat({
       setExecutionStatus("interrupted");
       setSplitReview({ scopeLabel: event.scopeLabel, summary: event.summary, items: event.items });
       releaseChatInput();
+      updateAssistantMessage(messageId, withoutHitlLoadingState);
       return;
     }
 
@@ -1495,6 +1620,12 @@ export function FridgeQueryChat({
       setExecutionStatus("interrupted");
       setMutationReview({ operation: event.operation, itemName: event.itemName, storageLocation: event.storageLocation });
       releaseChatInput();
+      updateAssistantMessage(messageId, withoutHitlLoadingState);
+      return;
+    }
+
+    if (event.type === "inventory_updated") {
+      onInventoryUpdated(event.inventory as Inventory);
       return;
     }
 
@@ -1965,17 +2096,34 @@ export function FridgeQueryChat({
           onRemove={onRemoveSeededItem}
           removable
         />
-        <textarea
-          aria-label="Ask FridgeFriend"
-          className="ff-chat-field"
-          disabled={isPending || clarification !== null || splitReview !== null || mutationReview !== null}
-          onKeyDown={handleFieldKeyDown}
-          onChange={(event) => setInput(event.currentTarget.value)}
-          placeholder="Ask about this fridge..."
-          ref={inputRef}
-          rows={2}
-          value={input}
-        />
+        <div className="ff-chat-field-shell">
+          <textarea
+            aria-label="Ask FridgeFriend"
+            className="ff-chat-field"
+            disabled={isPending || clarification !== null || splitReview !== null || mutationReview !== null}
+            onKeyDown={handleFieldKeyDown}
+            onChange={(event) => setInput(event.currentTarget.value)}
+            placeholder={CHATBOX_EXAMPLE_PROMPTS[placeholderIndex]}
+            ref={inputRef}
+            rows={2}
+            value={input}
+          />
+          {input.length === 0 ? (
+            <div className="ff-chat-placeholder" aria-hidden="true">
+              {previousPlaceholderIndex !== null ? (
+                <span className="ff-chat-placeholder__text ff-chat-placeholder__text--previous" key={`previous-${previousPlaceholderIndex}`}>
+                  {CHATBOX_EXAMPLE_PROMPTS[previousPlaceholderIndex]}
+                </span>
+              ) : null}
+              <span
+                className={`ff-chat-placeholder__text ff-chat-placeholder__text--current${previousPlaceholderIndex === null ? "" : " ff-chat-placeholder__text--incoming"}`}
+                key={`current-${placeholderIndex}`}
+              >
+                {CHATBOX_EXAMPLE_PROMPTS[placeholderIndex]}
+              </span>
+            </div>
+          ) : null}
+        </div>
         <button aria-label="Send" className="ff-chat-submit" disabled={isPending || clarification !== null || splitReview !== null || mutationReview !== null} type="submit">
           ↑
         </button>

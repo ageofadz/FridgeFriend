@@ -17,6 +17,7 @@ describe("query model service", () => {
     expect(createChatModel).toHaveBeenCalledWith({
       model: "gemini-3.1-flash-lite",
       streaming: false,
+      maxOutputTokens: undefined,
     });
   });
 
@@ -28,6 +29,19 @@ describe("query model service", () => {
     expect(createChatModel).toHaveBeenLastCalledWith({
       model: "gemini-3.1-flash-lite",
       streaming: true,
+      maxOutputTokens: undefined,
+    });
+  });
+
+  it("uses a small output budget for intent routing", async () => {
+    const { createIntentRoutingModel, INTENT_ROUTING_MAX_OUTPUT_TOKENS } = await import("../../../../../app/server/query/services/query-model.server");
+
+    createIntentRoutingModel();
+
+    expect(createChatModel).toHaveBeenLastCalledWith({
+      model: "gemini-3.1-flash-lite",
+      streaming: false,
+      maxOutputTokens: INTENT_ROUTING_MAX_OUTPUT_TOKENS,
     });
   });
 });

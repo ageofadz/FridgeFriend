@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { finalAssistantMessageText, groceryPlanCsv, hasAssistantResponseContent, loadingFoodEmojis, organizationPlanArtifactCopy } from "../../../app/components/FridgeQueryChat";
+import { CHATBOX_EXAMPLE_PROMPTS, finalAssistantMessageText, groceryPlanCsv, hasAssistantResponseContent, loadingFoodEmojis, organizationPlanArtifactCopy, withoutHitlLoadingState } from "../../../app/components/FridgeQueryChat";
+
+describe("chatbox example prompts", () => {
+  it("keeps the suggestion set in the requested range with ellipsis endings", () => {
+    expect(CHATBOX_EXAMPLE_PROMPTS.length).toBeGreaterThanOrEqual(8);
+    expect(CHATBOX_EXAMPLE_PROMPTS.length).toBeLessThanOrEqual(15);
+    expect(new Set(CHATBOX_EXAMPLE_PROMPTS).size).toBe(CHATBOX_EXAMPLE_PROMPTS.length);
+    expect(CHATBOX_EXAMPLE_PROMPTS.every((prompt) => prompt.endsWith("..."))).toBe(true);
+  });
+});
 
 describe("grocery plan CSV", () => {
   it("exports aisle, ingredient, recipe references, and completion state with RFC 4180 escaping", () => {
@@ -99,6 +108,25 @@ describe("chat loading visibility", () => {
       pantryCompletionClarification: "Try broadening the recipe category or adding more pantry items.",
       streaming: false,
     })).toBe(true);
+  });
+
+  it("removes the status-only loading state when a HITL prompt appears", () => {
+    const message = withoutHitlLoadingState({
+      id: "assistant-1",
+      role: "assistant",
+      text: "",
+      statusLines: ["persist_memory: Requesting inventory update review."],
+      streaming: true,
+    });
+
+    expect(message).toEqual({
+      id: "assistant-1",
+      role: "assistant",
+      text: "",
+      statusLines: undefined,
+      streaming: false,
+    });
+    expect(hasAssistantResponseContent(message)).toBe(false);
   });
 });
 

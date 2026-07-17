@@ -75,14 +75,11 @@ export function routeAfterInventoryEnrichment(state: FridgeQueryStateValue) {
 }
 
 export function routeRecipeRetrievalGrade(state: FridgeQueryStateValue) {
+  if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
+
   if (state.tournamentCandidates.length === 0) {
     if (state.recipeRewriteCount < 1) return "rewrite_recipe_query";
-    if (isPantryCompletionRequest(state)) return "plan_pantry_completion";
     return isGroceryPlannerRequest(state) ? "plan_groceries" : "respond";
-  }
-
-  if (isPantryCompletionRequest(state) && state.recipeRetrievalGrade?.relevant) {
-    return "plan_pantry_completion";
   }
 
   if (state.recipeRetrievalGrade?.relevant) {

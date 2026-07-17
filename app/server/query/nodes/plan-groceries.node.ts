@@ -25,6 +25,10 @@ import {
   type RankedRecipe,
 } from "../services/recipe-retrieval.server";
 import { createQueryModel, CHAT_PROVIDER, GENERAL_MODEL } from "../services/query-model.server";
+import {
+  ingredientNamesAreSimilar,
+  preferredIngredientName,
+} from "../services/ingredient-string-match.server";
 import type { FridgeQueryStateValue } from "../state";
 
 function asRankedRecipes(value: unknown): RankedRecipe[] {
@@ -107,14 +111,23 @@ function missingItems(input: {
       const canonical = normalizeIngredientName(ingredient.canonicalName);
       if (!canonical || recipeIngredientIsAvailable(canonical, input.availableIngredients)) continue;
 
-      const current = items.get(canonical) ?? {
-        ingredient: canonical,
+      const matchingKey = [...items.keys()].find((key) =>
+        ingredientNamesAreSimilar(key, canonical, { allowUniversalBasicOverlap: true })
+      );
+      const key = matchingKey ?? canonical;
+      const ingredientName = matchingKey ? preferredIngredientName(key, canonical) : canonical;
+      const current = items.get(key) ?? {
+        ingredient: ingredientName,
         recipeIds: [],
         recipeNames: [],
       };
       if (!current.recipeIds.includes(recipe.id)) current.recipeIds.push(recipe.id);
       if (!current.recipeNames.includes(recipe.name)) current.recipeNames.push(recipe.name);
-      items.set(canonical, current);
+      if (ingredientName !== key) {
+        items.delete(key);
+      }
+      current.ingredient = ingredientName;
+      items.set(ingredientName, current);
     }
   }
 

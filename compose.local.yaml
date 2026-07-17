@@ -1,16 +1,9 @@
 services:
   init-data:
-    build: .
     image: fridgefriend:local
 
   chroma:
-    build: .
-    image: fridgefriend:local
-
-  seed:
-    build: .
     image: fridgefriend:local
 
   app:
-    build: .
     image: fridgefriend:local

@@ -85,6 +85,19 @@ function state(candidates: RankedRecipe[]): FridgeQueryStateValue {
       notes: null,
       createdAt: "2026-07-17T00:00:00.000Z",
       updatedAt: "2026-07-17T00:00:00.000Z",
+    }, {
+      id: "external-tortillas",
+      name: "tortillas",
+      canonicalName: "tortillas",
+      storageLocation: "pantry",
+      quantity: null,
+      expirationDate: null,
+      status: "available",
+      confidence: 1,
+      source: "user",
+      notes: null,
+      createdAt: "2026-07-17T00:00:00.000Z",
+      updatedAt: "2026-07-17T00:00:00.000Z",
     }],
     dietaryRestrictions: [],
     dietaryPreferences: [],
@@ -145,6 +158,32 @@ describe("grocery planner node", () => {
     expect(plan.items.find((item) => item.ingredient === "garlic")?.recipeIds).toEqual(["one", "two"]);
     expect(plan.items.find((item) => item.ingredient === "rice")?.recipeIds).toEqual(["one", "three"]);
     expect(plan.items.map((item) => item.ingredient)).toEqual(["broccoli", "garlic", "lemon", "rice"]);
+  });
+
+  it("fuzzy-deduplicates grocery rows and treats close available ingredients as present", async () => {
+    const candidates = [
+      candidate("one", ["corn tortillas", "salt"]),
+      candidate("two", ["salt and pepper"]),
+      candidate("three", ["salt"]),
+    ];
+    const result = await createPlanGroceriesNode(deps({
+      selection: { recipeIds: ["one", "two", "three"] },
+      assignments: {
+        assignments: [
+          { ingredient: "salt", aisle: "condiments_spices" },
+        ],
+      },
+      recipes: [
+        recipe("one", ["chicken", "corn tortillas", "salt"]),
+        recipe("two", ["chicken", "salt and pepper"]),
+        recipe("three", ["chicken", "salt"]),
+      ],
+    }))(state(candidates));
+
+    const plan = result.context?.groceryPlan as { items: Array<{ ingredient: string; recipeIds: string[] }> };
+    expect(plan.items).toEqual([
+      { ingredient: "salt", aisle: "condiments_spices", recipeIds: ["one", "two", "three"], recipeNames: ["Recipe one", "Recipe two", "Recipe three"] },
+    ]);
   });
 
   it("reports an exact selection error instead of producing a grocery plan", async () => {

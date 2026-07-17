@@ -1,7 +1,6 @@
 import { getWriter, type LangGraphRunnableConfig } from "@langchain/langgraph";
 
 import { promptMessages } from "../../scan/services/prompt-messages.server";
-import { normalizeIngredientName } from "../../recipes/normalization";
 import { isUniversalBasicIngredient } from "../../recipes/pantry-basics";
 import {
   GroceryAisleAssignmentProviderSchema,
@@ -13,6 +12,10 @@ import {
 } from "../schemas/query";
 import { isPantryCompletionRequest } from "../services/grocery-planner.server";
 import { createQueryModel, CHAT_PROVIDER, GENERAL_MODEL } from "../services/query-model.server";
+import {
+  fuzzyCanonicalIngredientName,
+  fuzzyDeduplicateIngredientNames,
+} from "../services/ingredient-string-match.server";
 import type { RankedRecipe } from "../services/recipe-retrieval.server";
 import type { FridgeQueryStateValue } from "../state";
 
@@ -36,13 +39,28 @@ function candidateRecipes(state: FridgeQueryStateValue) {
 
 function eligibleRecipes(recipes: RankedRecipe[]): EligibleRecipe[] {
   return recipes.flatMap((recipe) => {
-    const missingIngredients = [...new Set(recipe.missingIngredients
-      .map(normalizeIngredientName)
-      .filter((ingredient) => ingredient && !isUniversalBasicIngredient(ingredient)))];
+    const missingIngredients = fuzzyDeduplicateIngredientNames(recipe.missingIngredients, { allowUniversalBasicOverlap: true })
+      .filter((ingredient) => ingredient && !isUniversalBasicIngredient(ingredient));
     return missingIngredients.length >= 1 && missingIngredients.length <= 3
       ? [{ ...recipe, missingIngredients }]
       : [];
   });
+}
+
+function harmonizeEligibleRecipes(recipes: EligibleRecipe[]) {
+  const names = fuzzyDeduplicateIngredientNames(
+    recipes.flatMap((recipe) => recipe.missingIngredients),
+    { allowUniversalBasicOverlap: true },
+  );
+  return recipes.map((recipe) => ({
+    ...recipe,
+    missingIngredients: fuzzyDeduplicateIngredientNames(
+      recipe.missingIngredients.map((ingredient) =>
+        fuzzyCanonicalIngredientName(ingredient, names, { allowUniversalBasicOverlap: true })
+      ),
+      { allowUniversalBasicOverlap: true },
+    ),
+  }));
 }
 
 function supportsIngredient(recipe: EligibleRecipe, ingredient: string) {
@@ -159,7 +177,7 @@ export function createPlanPantryCompletionNode(deps: QueryGraphDependencies = {}
     if (!isPantryCompletionRequest(state)) return {};
 
     const candidates = candidateRecipes(state);
-    const eligible = eligibleRecipes(candidates);
+    const eligible = harmonizeEligibleRecipes(eligibleRecipes(candidates));
     if (eligible.length === 0) {
       return planClarification(
         state,
@@ -180,15 +198,6 @@ export function createPlanPantryCompletionNode(deps: QueryGraphDependencies = {}
         config,
       );
     }
-    if (selection.unlocked.length < 3) {
-      return planClarification(
-        state,
-        "I found fewer than three relevant recipes for one pantry bundle. Try broadening the recipe category or adding more pantry items.",
-        `The best pantry bundle unlocked ${selection.unlocked.length} of ${eligible.length} structurally eligible recipes.`,
-        config,
-      );
-    }
-
     const loadedPrompt = deps.promptBundle?.groceryAisleAssignment;
     if (!loadedPrompt) {
       return planError(state, "Smart Pantry Completion aisle assignment prompt is unavailable.");

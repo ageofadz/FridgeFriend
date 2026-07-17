@@ -69,6 +69,15 @@ export const InventoryDetectionResponseSchema = {
             type: "string",
             nullable: true,
           },
+          stack: {
+            type: "object",
+            properties: {
+              on: { type: "string" },
+              conf: { type: "number" },
+              why: { type: "string" },
+            },
+            required: ["on", "conf", "why"],
+          },
         },
         required: [
           "id",
@@ -120,6 +129,11 @@ const InventoryDetectionModelRawDetection = z.object({
     "unknown",
   ]),
   qty: z.string().nullable(),
+  stack: z.object({
+    on: z.string(),
+    conf: z.number().min(0).max(1),
+    why: z.string(),
+  }).optional(),
 });
 
 export const InventoryDetectionModelResult = z.object({

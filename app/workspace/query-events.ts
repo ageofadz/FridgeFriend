@@ -275,6 +275,10 @@ export const QueryStreamEventSchema = z.discriminatedUnion("type", [
     storageLocation: z.string(),
   }),
   z.object({
+    type: z.literal("inventory_updated"),
+    inventory: z.unknown(),
+  }),
+  z.object({
     type: z.literal("final"),
     answer: z.string(),
     // Unknown intents degrade to null instead of failing the whole event.

@@ -89,12 +89,24 @@ function validateScope(scope: ChatScope) {
   if (!scope.fridgeId.trim()) throw new Error("Chat fridgeId is required");
 }
 
+function scopeWhereClause(scope: ChatScope) {
+  return {
+    sql: scope.imageId === null
+      ? "user_id = ? and fridge_id = ? and image_id is null"
+      : "user_id = ? and fridge_id = ? and image_id = ?",
+    params: scope.imageId === null
+      ? [scope.userId, scope.fridgeId]
+      : [scope.userId, scope.fridgeId, scope.imageId],
+  };
+}
+
 function getChatRow(id: string, scope: ChatScope) {
+  const scopeWhere = scopeWhereClause(scope);
   return withDatabase((_, sqlite) => sqlite.prepare(`
     select id, user_id, fridge_id, image_id, execution_status, created_at, updated_at
     from fridge_chat_threads
-    where id = ? and user_id = ? and fridge_id = ? and image_id is ?
-  `).get(id, scope.userId, scope.fridgeId, scope.imageId) as ChatRow | undefined);
+    where id = ? and ${scopeWhere.sql}
+  `).get(id, ...scopeWhere.params) as ChatRow | undefined);
 }
 
 function loadChat(id: string, scope: ChatScope) {
@@ -140,13 +152,14 @@ export function createChat(scope: ChatScope): PersistedChat {
 
 export function getOrCreateLatestChat(scope: ChatScope): PersistedChat {
   validateScope(scope);
+  const scopeWhere = scopeWhereClause(scope);
   const existing = withDatabase((_, sqlite) => sqlite.prepare(`
     select id
     from fridge_chat_threads
-    where user_id = ? and fridge_id = ? and image_id is ?
+    where ${scopeWhere.sql}
     order by updated_at desc, rowid desc
     limit 1
-  `).get(scope.userId, scope.fridgeId, scope.imageId) as { id: string } | undefined);
+  `).get(...scopeWhere.params) as { id: string } | undefined);
 
   return existing ? loadChat(existing.id, scope) : createChat(scope);
 }
@@ -178,10 +191,11 @@ export function startChatTurn(input: ChatScope & {
 
   withDatabase((_, sqlite) => {
     const transaction = sqlite.transaction(() => {
+      const scopeWhere = scopeWhereClause(input);
       const thread = sqlite.prepare(`
         select id from fridge_chat_threads
-        where id = ? and user_id = ? and fridge_id = ? and image_id is ?
-      `).get(input.threadId, input.userId, input.fridgeId, input.imageId);
+        where id = ? and ${scopeWhere.sql}
+      `).get(input.threadId, ...scopeWhere.params);
 
       if (!thread) {
         throw new Error(`Chat thread ${input.threadId} was not found for this fridge`);
@@ -222,6 +236,7 @@ export function updateChatAssistantMessage(input: ChatScope & {
   withDatabase((_, sqlite) => {
     const transaction = sqlite.transaction(() => {
       const now = new Date().toISOString();
+      const scopeWhere = scopeWhereClause(input);
       const result = sqlite.prepare(`
         update fridge_chat_messages
         set payload_json = ?, status = ?, updated_at = ?
@@ -235,8 +250,8 @@ export function updateChatAssistantMessage(input: ChatScope & {
       const thread = sqlite.prepare(`
         update fridge_chat_threads
         set execution_status = ?, updated_at = ?
-        where id = ? and user_id = ? and fridge_id = ? and image_id is ?
-      `).run(input.status, now, input.threadId, input.userId, input.fridgeId, input.imageId);
+        where id = ? and ${scopeWhere.sql}
+      `).run(input.status, now, input.threadId, ...scopeWhere.params);
 
       if (thread.changes !== 1) {
         throw new Error(`Chat thread ${input.threadId} was not found for this fridge`);
