@@ -1,0 +1,283 @@
+import { TaskType } from "@google/generative-ai";
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+import type { Metadata } from "chromadb";
+
+import { getRecipeCollection } from "../chroma.server";
+import { requiredEnv } from "../env.server";
+import { buildFoodComRetrievalDocument } from "./foodcom.server";
+import type { Recipe, RecipeCandidate, RecipeIndexSkip } from "./types";
+
+export const DEFAULT_RECIPE_CANDIDATE_LIMIT = 30;
+export const MAX_RECIPE_CANDIDATE_LIMIT = 120;
+const RECIPE_EMBEDDING_MODEL = "gemini-embedding-001";
+const RECIPE_INDEX_BATCH_SIZE = 100;
+
+type RecipeMetadata = Metadata & {
+  documentType: "recipe";
+  recipeId: string;
+  minutes: number;
+  calories: number;
+  hasCalories: boolean;
+  proteinDailyValue: number;
+  hasProteinDailyValue: boolean;
+  averageRating: number;
+  ratingCount: number;
+};
+
+type RecipeEmbeddings = {
+  embedDocuments(documents: string[]): Promise<number[][]>;
+  embedQuery(query: string): Promise<number[]>;
+};
+
+type RecipeCollectionHandle = {
+  get(input: {
+    ids: string[];
+    include: [];
+  }): Promise<{
+    ids: string[];
+  }>;
+  upsert(input: {
+    ids: string[];
+    embeddings: number[][];
+    documents: string[];
+    metadatas: RecipeMetadata[];
+  }): Promise<void>;
+  query<TMetadata extends Metadata>(input: {
+    queryEmbeddings: number[][];
+    nResults: number;
+    where: Record<string, string>;
+    include: ["metadatas", "distances"];
+  }): Promise<{
+    rows(): Array<Array<{
+      metadata?: TMetadata | null;
+      distance?: number | null;
+    }>>;
+  }>;
+};
+
+type RecipeCollection = {
+  handle: RecipeCollectionHandle;
+};
+
+export type RecipeVectorStoreDependencies = {
+  embeddings?: RecipeEmbeddings;
+  getCollection?: () => Promise<RecipeCollection>;
+  onSkippedRecipe?: (skip: RecipeIndexSkip) => void;
+};
+
+export type RecipeSearchInput = {
+  query: string;
+  limit?: number;
+};
+
+function createRecipeEmbeddings(taskType: TaskType): RecipeEmbeddings {
+  return new GoogleGenerativeAIEmbeddings({
+    apiKey: requiredEnv("GOOGLE_API_KEY"),
+    modelName: RECIPE_EMBEDDING_MODEL,
+    taskType,
+  });
+}
+
+function metadataForRecipe(recipe: Recipe): RecipeMetadata {
+  return {
+    documentType: "recipe",
+    recipeId: recipe.id,
+    minutes: recipe.minutes,
+    calories: recipe.nutrition.calories ?? -1,
+    hasCalories: recipe.nutrition.calories !== null,
+    proteinDailyValue: recipe.nutrition.proteinDailyValue ?? -1,
+    hasProteinDailyValue: recipe.nutrition.proteinDailyValue !== null,
+    averageRating: recipe.rating?.average ?? -1,
+    ratingCount: recipe.rating?.count ?? 0,
+  };
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function similarityFromDistance(distance: number) {
+  return 1 / (1 + Math.max(distance, 0));
+}
+
+function validateLimit(limit: number) {
+  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_RECIPE_CANDIDATE_LIMIT) {
+    throw new Error(
+      `Food.com recipe candidate limit must be an integer from 1 to ${MAX_RECIPE_CANDIDATE_LIMIT}; received ${limit}`,
+    );
+  }
+}
+
+function collectionLoader(dependencies: RecipeVectorStoreDependencies) {
+  return dependencies.getCollection ?? getRecipeCollection as () => Promise<RecipeCollection>;
+}
+
+async function missingRecipes(collection: RecipeCollection, batch: Recipe[]) {
+  const existing = await collection.handle.get({
+    ids: batch.map((recipe) => recipe.id),
+    include: [],
+  });
+  const existingIds = new Set(existing.ids);
+
+  return batch.filter((recipe) => !existingIds.has(recipe.id));
+}
+
+function invalidEmbeddingReason(vector: number[] | undefined) {
+  if (!Array.isArray(vector)) {
+    return "embedding model returned no vector";
+  }
+
+  if (vector.length === 0) {
+    return "embedding model returned an empty vector";
+  }
+
+  if (vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+    return "embedding model returned a vector with a non-finite numeric value";
+  }
+
+  return null;
+}
+
+function validEmbeddingRecords(
+  recipes: Recipe[],
+  documents: string[],
+  vectors: number[][],
+  onSkippedRecipe: (skip: RecipeIndexSkip) => void,
+) {
+  const valid: Array<{
+    recipe: Recipe;
+    document: string;
+    vector: number[];
+  }> = [];
+
+  recipes.forEach((recipe, index) => {
+    const vector = vectors[index];
+    const reason = invalidEmbeddingReason(vector);
+
+    if (reason) {
+      onSkippedRecipe({ recipeId: recipe.id, reason });
+      return;
+    }
+
+    valid.push({
+      recipe,
+      document: documents[index] ?? "",
+      vector,
+    });
+  });
+
+  if (vectors.length > recipes.length) {
+    throw new Error(
+      `Embedding model returned ${vectors.length} vectors for ${recipes.length} recipes`,
+    );
+  }
+
+  return valid;
+}
+
+export async function indexRecipesInChroma(
+  recipes: Recipe[],
+  dependencies: RecipeVectorStoreDependencies = {},
+): Promise<number> {
+  if (recipes.length === 0) {
+    return 0;
+  }
+
+  try {
+    const embeddings = dependencies.embeddings ?? createRecipeEmbeddings(TaskType.RETRIEVAL_DOCUMENT);
+    const collection = await collectionLoader(dependencies)();
+    const onSkippedRecipe = dependencies.onSkippedRecipe ?? (() => undefined);
+    let indexed = 0;
+
+    for (const batch of chunk(recipes, RECIPE_INDEX_BATCH_SIZE)) {
+      const missing = await missingRecipes(collection, batch);
+
+      if (missing.length === 0) {
+        continue;
+      }
+
+      const documents = missing.map(buildFoodComRetrievalDocument);
+      const vectors = await embeddings.embedDocuments(documents);
+      const valid = validEmbeddingRecords(missing, documents, vectors, onSkippedRecipe);
+
+      if (valid.length === 0) {
+        continue;
+      }
+
+      await collection.handle.upsert({
+        ids: valid.map(({ recipe }) => recipe.id),
+        embeddings: valid.map(({ vector }) => vector),
+        documents: valid.map(({ document }) => document),
+        metadatas: valid.map(({ recipe }) => metadataForRecipe(recipe)),
+      });
+      indexed += valid.length;
+    }
+
+    return indexed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Food.com recipe Chroma indexing failed: ${message}`);
+  }
+}
+
+export async function searchRecipeCandidates(
+  input: RecipeSearchInput,
+  dependencies: RecipeVectorStoreDependencies = {},
+): Promise<RecipeCandidate[]> {
+  const query = input.query.trim();
+  const limit = input.limit ?? DEFAULT_RECIPE_CANDIDATE_LIMIT;
+  validateLimit(limit);
+
+  if (!query) {
+    return [];
+  }
+
+  try {
+    const embeddings = dependencies.embeddings ?? createRecipeEmbeddings(TaskType.RETRIEVAL_QUERY);
+    const collection = await collectionLoader(dependencies)();
+    const queryEmbedding = await embeddings.embedQuery(query);
+    const result = await collection.handle.query<RecipeMetadata>({
+      queryEmbeddings: [queryEmbedding],
+      nResults: limit,
+      where: { documentType: "recipe" },
+      include: ["metadatas", "distances"],
+    });
+    const candidates = result.rows()[0] ?? [];
+    const seen = new Set<string>();
+
+    return candidates
+      .map((candidate) => {
+        const recipeId = candidate.metadata?.recipeId;
+        const distance = candidate.distance;
+
+        if (!recipeId || distance === null || distance === undefined || !Number.isFinite(distance)) {
+          throw new Error("Chroma returned a recipe candidate without a valid recipe ID and distance");
+        }
+
+        return {
+          recipeId,
+          semanticScore: similarityFromDistance(distance),
+        } satisfies RecipeCandidate;
+      })
+      .filter((candidate) => {
+        if (seen.has(candidate.recipeId)) {
+          return false;
+        }
+
+        seen.add(candidate.recipeId);
+        return true;
+      })
+      .sort((left, right) =>
+        right.semanticScore - left.semanticScore || left.recipeId.localeCompare(right.recipeId)
+      );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Food.com recipe Chroma search failed: ${message}`);
+  }
+}

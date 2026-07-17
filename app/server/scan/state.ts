@@ -1,0 +1,71 @@
+import { ReducedValue, StateSchema } from "@langchain/langgraph";
+import { z } from "zod";
+
+import { FridgeZoneMap, Inventory, RawDetection } from "./schemas/inventory";
+import {
+  AmbiguousLocationRequest,
+  LocationAdjudicationDecision,
+  ReconciledLocation,
+  ScanError,
+  ValidationResult,
+} from "./schemas/scan-result";
+
+function mergeByKey<TItem>(
+  current: TItem[],
+  next: TItem[],
+  keyFor: (item: TItem) => string,
+) {
+  const merged = new Map(current.map((item) => [keyFor(item), item]));
+
+  for (const item of next) {
+    merged.set(keyFor(item), item);
+  }
+
+  return Array.from(merged.values());
+}
+
+export const ScanState = new StateSchema({
+  fridgeId: z.string(),
+  imageIds: z.array(z.string()),
+  storageLocation: z.enum(["fridge", "freezer", "pantry"]),
+  rawDetections: z.array(RawDetection).default([]),
+  detectionModelRawOutput: z.unknown().nullable().default(null),
+  zoneMaps: new ReducedValue(z.array(FridgeZoneMap).default(() => []), {
+    reducer: (current, next) =>
+      mergeByKey(current, next, (zoneMap) => zoneMap.imageId),
+  }),
+  zoneMapModelRawOutput: z.unknown().nullable().default(null),
+  reconciledLocations: new ReducedValue(
+    z.array(ReconciledLocation).default(() => []),
+    {
+      reducer: (current, next) =>
+        mergeByKey(current, next, (location) => location.detectionId),
+    },
+  ),
+  ambiguousLocationRequests: new ReducedValue(
+    z.array(AmbiguousLocationRequest).default(() => []),
+    {
+      reducer: (current, next) =>
+        mergeByKey(current, next, (request) => request.detectionId),
+    },
+  ),
+  adjudicationDecisions: new ReducedValue(
+    z.array(LocationAdjudicationDecision).default(() => []),
+    {
+      reducer: (current, next) =>
+        mergeByKey(current, next, (decision) => decision.detectionId),
+    },
+  ),
+  inventory: Inventory.nullable().default(null),
+  imageValidation: ValidationResult.nullable().default(null),
+  detectionValidation: ValidationResult.nullable().default(null),
+  zoneMapValidation: ValidationResult.nullable().default(null),
+  reconciliationValidation: ValidationResult.nullable().default(null),
+  adjudicationValidation: ValidationResult.nullable().default(null),
+  scanStatus: z
+    .enum(["pending", "processing", "completed", "failed"])
+    .default("pending"),
+  error: ScanError.nullable().default(null),
+});
+
+export type ScanStateValue = typeof ScanState.State;

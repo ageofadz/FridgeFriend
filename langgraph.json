@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "scan_graph": "./app/server/scan/graph.server.ts:createScanGraph",
+    "query_graph": "./app/server/query-graph.server.ts:createQueryGraph"
+  },
+  "env": "./.env",
+  "node_version": "22"
+}

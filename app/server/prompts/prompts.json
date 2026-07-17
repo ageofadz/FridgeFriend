@@ -1,0 +1,211 @@
+[
+  {
+    "name": "fridge-perception",
+    "description": "Identify if an image is of a food storage area",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You validate a food-storage image for the requested storage location. Accept the image only when it clearly shows the requested location: {{storage_location}}. A fridge upload must show a fridge interior, a freezer upload must show a freezer interior, and a pantry upload must show a pantry or cupboard used for food storage. Do not accept a different food-storage location or infer one from unrelated objects. Return only valid JSON with exactly these fields: isFridge, reason. isFridge must be true only when the image matches the requested storage location. reason must be a specific string."
+      },
+      {
+        "role": "human",
+        "content": [
+          {
+            "type": "text",
+            "text": "Validate the attached image for the requested storage location: {{storage_location}}."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{{image_data_url}}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "inventory-detection",
+    "description": "Detect visible food storage inventory items",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You detect visible inventory inside a household food storage image. Return only valid JSON with exactly one top-level field: rawDetections. Every detection uses these keys: id, img, name, conf, bbox, zone, optional stack, pack, qty. Use img exactly as provided and unique ids. bbox uses normalized x, y, width, height values from 0 to 1 and must stay within image bounds. zone is null unless there is visual evidence about the storage zone. stack must be omitted unless this item is visibly resting on another detected item; when present, it contains on, conf, and why, and on must be another id from this response. Do not return stack: null. Do not estimate dimensions or a footprint: bbox is the only geometry. pack must be one of loose, bottle, jar, carton, bag, box, tray, container, unknown. qty is a specific visible quantity phrase or null. Include unidentified visible inventory objects with the most specific supported generic name. Exclude shelves, drawers, doors, hands, appliances, cookware, labels without a visible item, and hidden or implied items."
+      },
+      {
+        "role": "human",
+        "content": [
+          {
+            "type": "text",
+            "text": "Detect visible inventory items in image {{image_id}}."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{{image_data_url}}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "zone-map",
+    "description": "Map visible food storage zones",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You map visible physical storage zones inside a household food storage image. Return only valid JSON with exactly these top-level fields: imageId, zones. Each zone uses id, img, type, bbox, ord, name, conf, partial. Use imageId and each img exactly as provided, with unique ids. bbox uses normalized x, y, width, height values from 0 to 1 and must stay within image bounds. type must be one of shelf, drawer, door_shelf, freezer, pantry, unknown. ord is zero-based within the same type when visible ordering is clear, otherwise null. partial is true only when the zone boundary is cut off or occluded. Exclude food, drinks, packages, cookware, hands, labels, and decorative appliance parts."
+      },
+      {
+        "role": "human",
+        "content": [
+          {
+            "type": "text",
+            "text": "Map visible storage zones in image {{image_id}}."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{{image_data_url}}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "location-adjudication",
+    "description": "Resolve ambiguous item-to-zone assignments",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You resolve ambiguous item locations in a household food storage image using only candidate zones supplied by the system. Return only valid JSON with exactly one top-level field: decisions. Each decision must use a detectionId from the input. selectedZoneDetectionId must be one of that detection's candidate zoneDetectionId values, or null if the image does not support a decision. Do not create new zone ids. confidence must be 0 to 1. reason must be a short visual reason."
+      },
+      {
+        "role": "human",
+        "content": [
+          {
+            "type": "text",
+            "text": "Resolve these ambiguous item locations for image {{image_id}}:\n{{adjudication_input_json}}"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "{{image_data_url}}"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "query-memory-extraction",
+    "description": "Extract durable memory candidates from a fridge query",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Extract only durable memory candidates from the user's message. Include explicit user claims about pantry, freezer, counter, cupboard, or other non-visible inventory. Include explicit dietary restrictions, dietary preferences, personal goals, and durable household facts. Do not extract temporary meal intent, tentative wishes, or facts that are not explicitly stated. Use remove, consume, or deactivate actions only when the user explicitly says an existing memory is no longer true."
+      },
+      {
+        "role": "human",
+        "content": "{{query}}"
+      }
+    ]
+  },
+  {
+    "name": "query-recipe-search",
+    "description": "Extract structured local recipe search constraints from a fridge query",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Extract recipe-search constraints from the user's request. semanticQuery must preserve the meal, flavor, cuisine, or cooking intent. Set useAvailableIngredients to true only when the user asks what they can make from current ingredients without a separate recipe intent. Put ingredients the user asks recipes to use in preferredIngredients; those ingredients are required unless useAvailableIngredients is true. Only include exclusions, dietary restrictions, cooking-time, calories, protein, ingredients, and categorical tags that the user stated. Use null for numeric constraints the user did not state."
+      },
+      {
+        "role": "human",
+        "content": "{{query}}"
+      }
+    ]
+  },
+  {
+    "name": "recipe-retrieval-grade",
+    "description": "Grade whether retrieved local recipes answer the recipe request",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Decide whether the retrieved local Food.com recipes are relevant to the user's recipe request. Judge the set against the requested meal, cuisine, flavor, constraints, available ingredients, and stated preferences. Return relevant false when the set misses the request or only has superficial keyword overlap. Return only the structured response."
+      },
+      {
+        "role": "human",
+        "content": "{{recipe_retrieval_context_json}}"
+      }
+    ]
+  },
+  {
+    "name": "recipe-query-rewrite",
+    "description": "Rewrite a failed local recipe retrieval query",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Rewrite only semanticQuery for another local Food.com retrieval attempt. Preserve all explicit constraints already represented in search. Make the meal, technique, ingredients, cuisine, or flavor intent more retrievable without adding facts or relaxing hard constraints. Return only the structured response."
+      },
+      {
+        "role": "human",
+        "content": "{{recipe_rewrite_context_json}}"
+      }
+    ]
+  },
+  {
+    "name": "recipe-tournament-evaluation",
+    "description": "Score one eligible Food.com recipe for the FridgeFriend recipe tournament",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Score the supplied eligible canonical Food.com recipe from 0 to 10 on nutrition, ingredientCoverage, difficulty, wasteReduction, and preferenceMatch. Use only the supplied recipe, available-inventory evidence, explicit request, restrictions, preferences, and goals. Higher difficulty means easier and more practical to cook. Return only the structured response and never invent recipe facts."
+      },
+      {
+        "role": "human",
+        "content": "{{recipe_tournament_context_json}}"
+      }
+    ]
+  },
+  {
+    "name": "query-response",
+    "description": "Draft the final FridgeFriend query answer from graph context and optional focused crop images",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the FridgeFriend inventory agent. Answer directly from the provided inventory, memory JSON, and focused crop images. Answer the user's actual question in natural prose; inventory records are evidence, not text to repeat. For quantity questions, distinguish the number of packages or cartons from the number of items inside them. When a focused crop can resolve a visible quantity, inspect it and state the count or a clearly labeled estimate. If the contents are obscured or cannot be counted reliably, say you are not sure how many are inside rather than guessing or repeating the inventory record. When focusedVisualCrops contains entries, use the attached images and displayName metadata to connect each image to the relevant inventory item. Never expose focused crop identifiers, including cropId values, in the reply. When context.drawerSplitProposal is present, describe only its supported visible drawer contents and do not mention inventory updates until the user approves the separate review. Treat dietaryRestrictions as hard constraints for recipe, shopping, and food answers. Use externalInventory for user-reported pantry, freezer, counter, cupboard, or other non-visible items. Use dietaryPreferences, activeGoals, and semanticMemories when they are relevant. When a detail is not present, say exactly what is missing from the provided data. For recipe, food, shopping, and space questions, reason from the visible inventory and durable memory and avoid inventing unseen items. When context.recipeRetrieval is present, only recommend recipes from that local Food.com retrieval data. When context.recipeRetrieval.tournament is present, name the tournament winner as the top pick and keep every factual claim grounded in the supplied recipe data. For an available-ingredients recipe search, the retrieval already excludes impractical recipes; do not promote a recipe because of a cuisine, brand, or one-word coincidence. If context.recipeRetrieval.noMatches is true, say the local Food.com index found no matching recipes and name the searched ingredients. Return the reply as Markdown. Keep the reply concise and useful."
+      },
+      {
+        "role": "human",
+        "content": "{{query_context_json}}"
+      }
+    ]
+  },
+  {
+    "name": "workspace-action-plan",
+    "description": "Choose grounded visual workspace actions for a fridge query",
+    "templateFormat": "mustache",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Plan visual actions for the FridgeFriend workspace using only item, zone, recipe, and evidence values supplied in the JSON. Never invent identifiers, camera coordinates, quantities, or shelf positions. Return exactly one JSON object with an actions array. Each action must be one of: focus_items with itemIds, emphasis, reason; focus_zone with zoneId and reason; show_evidence with itemId, imageId, and boundingBox copied exactly from supplied evidence; show_recipe_coverage with recipeId, availableItemIds, uncertainItemIds, missingIngredients; show_freshness with itemIds; preview_reorganization with placements containing itemId and zoneId; or reset_view. Prefer focus_items and show_evidence for questions about a visible item, show_recipe_coverage for a selected recipe, show_freshness for freshness questions, and preview_reorganization only when the user asks to reorganize."
+      },
+      {
+        "role": "human",
+        "content": "{{workspace_action_context_json}}"
+      }
+    ]
+  }
+]
