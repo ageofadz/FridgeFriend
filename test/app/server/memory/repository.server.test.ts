@@ -284,6 +284,114 @@ describe("memory repository", () => {
     expect(context.activeGoals).toEqual([]);
   });
 
+  it("replaces a free-from preference when the user later likes its ingredient", () => {
+    persist({
+      kind: "preference",
+      scope: "user",
+      action: "upsert",
+      subject: "oil-free food",
+      sentiment: "like",
+      strength: 3,
+      notes: null,
+      explicit: true,
+    });
+    const result = persist({
+      kind: "preference",
+      scope: "user",
+      action: "upsert",
+      subject: "oil",
+      sentiment: "like",
+      strength: 3,
+      notes: null,
+      explicit: true,
+    });
+    const context = listStructuredMemoryContext({
+      userId: DEFAULT_USER_ID,
+      fridgeId: DEFAULT_FRIDGE_ID,
+    });
+
+    expect(result.result.status).toBe("persisted");
+    expect(context.dietaryPreferences).toEqual([
+      expect.objectContaining({
+        subject: "oil",
+        sentiment: "like",
+      }),
+    ]);
+  });
+
+  it("removes a free-from preference from an ingredient-level retraction", () => {
+    persist({
+      kind: "preference",
+      scope: "user",
+      action: "upsert",
+      subject: "oil-free food",
+      sentiment: "like",
+      strength: 3,
+      notes: null,
+      explicit: true,
+    });
+    const result = persist({
+      kind: "preference",
+      scope: "user",
+      action: "remove",
+      subject: "oil",
+      sentiment: "like",
+      strength: 3,
+      notes: null,
+      explicit: true,
+    });
+    const context = listStructuredMemoryContext({
+      userId: DEFAULT_USER_ID,
+      fridgeId: DEFAULT_FRIDGE_ID,
+    });
+
+    expect(result.result.status).toBe("persisted");
+    expect(context.dietaryPreferences).toEqual([]);
+  });
+
+  it("deactivates a standard goal despite a paraphrased completion update", () => {
+    persist({
+      kind: "goal",
+      scope: "user",
+      action: "upsert",
+      goalType: "weight_loss",
+      description: "Lose weight",
+      targetValue: null,
+      targetUnit: null,
+      priority: 3,
+      explicit: true,
+    });
+    persist({
+      kind: "goal",
+      scope: "user",
+      action: "upsert",
+      goalType: "weight_loss",
+      description: "Reach my target weight",
+      targetValue: null,
+      targetUnit: null,
+      priority: 3,
+      explicit: true,
+    });
+    const result = persist({
+      kind: "goal",
+      scope: "user",
+      action: "deactivate",
+      goalType: "weight_loss",
+      description: "I reached it and no longer need this goal",
+      targetValue: null,
+      targetUnit: null,
+      priority: 3,
+      explicit: true,
+    });
+    const context = listStructuredMemoryContext({
+      userId: DEFAULT_USER_ID,
+      fridgeId: DEFAULT_FRIDGE_ID,
+    });
+
+    expect(result.result.status).toBe("persisted");
+    expect(context.activeGoals).toEqual([]);
+  });
+
   it("throws a specific error for invalid stored external inventory status", () => {
     ensureMemoryProfile();
 

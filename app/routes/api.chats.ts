@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
-import { createChat, getChat, getOrCreateLatestChat } from "../server/chat/repository.server";
+import { clearChats, createChat, getChat, getOrCreateLatestChat } from "../server/chat/repository.server";
 import { jsonError } from "../server/http.server";
 
 type ChatScope = {
@@ -70,10 +70,14 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!isRecord(body)) {
       throw new Error("Chat request body must be an object");
     }
-    if (body.action !== "create") {
-      throw new Error("Chat request action must be create");
+    if (body.action === "clear") {
+      const chat = clearChats(scopeFromBody(body));
+      return Response.json({ chat });
     }
 
+    if (body.action !== "create") {
+      throw new Error("Chat request action must be create or clear");
+    }
     const chat = createChat(scopeFromBody(body));
     return Response.json({ chat }, { status: 201 });
   } catch (error) {

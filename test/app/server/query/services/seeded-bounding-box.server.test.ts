@@ -117,7 +117,7 @@ describe("seedInventoryBoundingBox", () => {
     delete process.env.DATABASE_PATH;
   });
 
-  it("adds a drawn crop to a known inventory item without calling vision identification", async () => {
+  it("creates a new item when a drawn crop overlaps an existing inventory item", async () => {
     const image = createFridgeImage({
       dataUrl: createJpegDataUrl(),
       originalName: "fridge.jpg",
@@ -133,16 +133,46 @@ describe("seedInventoryBoundingBox", () => {
       imageId: image.id,
       boundingBox: { x: 0.12, y: 0.12, width: 0.28, height: 0.28 },
       identifySeededBox: async () => {
-        throw new Error("Known item bbox should not call vision identification");
+        return {
+          label: "Cream Cheese",
+          name: "cream cheese",
+          confidence: 0.84,
+          category: "dairy",
+          subcategory: "cheese",
+          packaging: "container",
+          quantity: {
+            amount: 1,
+            unit: "container",
+            precision: "estimated",
+            fillLevel: null,
+          },
+          attributes: {
+            brand: null,
+            variant: null,
+            opened: null,
+            expirationDate: null,
+          },
+          visualSummary: "A cream cheese container is visible in the selected crop.",
+        };
       },
     });
 
-	    expect(result.status).toBe("known_item");
-	    expect(result.item.id).toBe("item-1");
-	    expect(result.cropId).toBe(`${image.id}:item-1:1`);
-	    const observations = getFridgeInventoryForImage(image.id)?.items[0].loc.observations;
-	    expect(observations).toHaveLength(2);
-	    expect(observations?.[1].depthBackRatio).toBeCloseTo(0.4);
+    expect(result.status).toBe("created_item");
+    expect(result.item.id).not.toBe("item-1");
+    expect(result.cropId).toBe(`${image.id}:${result.item.id}:0`);
+    const savedInventory = getFridgeInventoryForImage(image.id);
+    expect(savedInventory?.items).toHaveLength(2);
+    expect(savedInventory?.items[0].loc.observations).toHaveLength(1);
+    expect(savedInventory?.items[1]).toMatchObject({
+      id: result.item.id,
+      label: "Cream Cheese",
+      loc: {
+        observations: [{
+          imageId: image.id,
+          boundingBox: { x: 0.12, y: 0.12, width: 0.28, height: 0.28 },
+        }],
+      },
+    });
   });
 
   it("creates a populated review item for an unknown drawn crop", async () => {

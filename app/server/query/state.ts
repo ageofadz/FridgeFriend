@@ -67,7 +67,10 @@ export const FridgeQueryState = new StateSchema({
     displayName: z.string(),
     imageId: z.string(),
   })).default([]),
-  context: z.record(z.string(), z.unknown()).default({}),
+  context: new ReducedValue(
+    z.record(z.string(), z.unknown()).default(() => ({})),
+    { reducer: (current, update) => ({ ...current, ...update }) },
+  ),
   answer: z.string().nullable().default(null),
 });
 

@@ -6,6 +6,7 @@ export type {
   ExpiryPlan,
   GroceryPlan,
   GroceryPlanItem,
+  GoalMemory,
   InventoryClarificationQuestion,
   PantryCompletionPlan,
   PantryCompletionSuggestion,

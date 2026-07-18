@@ -127,6 +127,20 @@ export function normalizeMemoryKey(value: string) {
     .replace(/\s+/g, " ");
 }
 
+function preferenceTopic(value: string) {
+  const normalized = normalizeMemoryKey(value).replaceAll("-", " ");
+  const withoutFoodContext = normalized.replace(/\s+(?:food|foods|dish|dishes|meal|meals)$/u, "");
+  const freeMatch = withoutFoodContext.match(/^(.+?)\s+free$/u);
+
+  if (freeMatch) {
+    return normalizeMemoryKey(freeMatch[1]);
+  }
+
+  const exclusionMatch = withoutFoodContext.match(/^(?:no|without)\s+(.+)$/u);
+
+  return normalizeMemoryKey(exclusionMatch?.[1] ?? withoutFoodContext);
+}
+
 function scopedKey(...parts: string[]) {
   return parts.map((part) => normalizeMemoryKey(part)).join(":");
 }
@@ -1160,19 +1174,20 @@ export function applyMemoryCandidate(input: {
         candidate.sentiment,
         candidate.subject,
       );
-      const existing = db
+      const preferences = db
         .select()
         .from(dietaryPreferences)
-        .where(
-          and(
-            eq(dietaryPreferences.userId, profile.userId),
-            eq(dietaryPreferences.normalizedKey, normalizedKey),
-          ),
-        )
-        .get();
+        .where(eq(dietaryPreferences.userId, profile.userId))
+        .all();
+      const matchingPreferences = preferences.filter((preference) =>
+        preferenceTopic(preference.subject) === preferenceTopic(candidate.subject)
+      );
+      const existing = matchingPreferences.find((preference) =>
+        preference.normalizedKey === normalizedKey
+      );
 
       if (candidate.action === "remove") {
-        if (!existing) {
+        if (matchingPreferences.length === 0) {
           return {
             result: writeResult(
               candidate,
@@ -1185,13 +1200,21 @@ export function applyMemoryCandidate(input: {
         }
 
         db.delete(dietaryPreferences)
-          .where(eq(dietaryPreferences.id, existing.id))
+          .where(inArray(dietaryPreferences.id, matchingPreferences.map((preference) => preference.id)))
           .run();
 
         return {
-          result: writeResult(candidate, "persisted", existing.id, "Removed preference"),
+          result: writeResult(candidate, "persisted", matchingPreferences[0].id, "Removed preference"),
           semanticMemory: null,
         };
+      }
+
+      const conflictingPreferences = matchingPreferences.filter((preference) => preference.id !== existing?.id);
+
+      if (conflictingPreferences.length > 0) {
+        db.delete(dietaryPreferences)
+          .where(inArray(dietaryPreferences.id, conflictingPreferences.map((preference) => preference.id)))
+          .run();
       }
 
       const row = {
@@ -1233,25 +1256,29 @@ export function applyMemoryCandidate(input: {
 
     if (candidate.kind === "goal") {
       const normalizedKey = scopedKey("goal", candidate.goalType, candidate.description);
-      const existing = db
+      const matchingGoals = db
         .select()
         .from(goals)
         .where(
           and(
             eq(goals.userId, profile.userId),
-            eq(goals.normalizedKey, normalizedKey),
+            candidate.goalType === "other"
+              ? eq(goals.normalizedKey, normalizedKey)
+              : eq(goals.goalType, candidate.goalType),
           ),
         )
-        .get();
+        .all();
+      const activeGoals = matchingGoals.filter((goal) => goal.active === 1);
+      const existing = activeGoals[0] ?? matchingGoals[0];
 
       if (candidate.action === "deactivate") {
-        if (!existing) {
+        if (activeGoals.length === 0) {
           return {
             result: writeResult(
               candidate,
               "skipped",
               null,
-              `No active goal matched ${candidate.description}`,
+              `No active ${candidate.goalType} goal matched this update`,
             ),
             semanticMemory: null,
           };
@@ -1262,11 +1289,61 @@ export function applyMemoryCandidate(input: {
             active: 0,
             updatedAt: now,
           })
-          .where(eq(goals.id, existing.id))
+          .where(
+            and(
+              eq(goals.userId, profile.userId),
+              eq(goals.goalType, candidate.goalType),
+              eq(goals.active, 1),
+            ),
+          )
           .run();
 
         return {
-          result: writeResult(candidate, "persisted", existing.id, "Deactivated goal"),
+          result: writeResult(candidate, "persisted", activeGoals[0].id, "Deactivated goal"),
+          semanticMemory: null,
+        };
+      }
+
+      if (candidate.goalType !== "other" && existing) {
+        db.update(goals)
+          .set({
+            description: candidate.description.trim(),
+            targetValue: candidate.targetValue,
+            targetUnit: candidate.targetUnit,
+            priority: candidate.priority,
+            active: 1,
+            source: "user_explicit",
+            updatedAt: now,
+          })
+          .where(eq(goals.id, existing.id))
+          .run();
+
+        if (activeGoals.length > 1) {
+          db.update(goals)
+            .set({
+              active: 0,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(goals.userId, profile.userId),
+                eq(goals.goalType, candidate.goalType),
+                eq(goals.active, 1),
+              ),
+            )
+            .run();
+
+          db.update(goals)
+            .set({
+              active: 1,
+              updatedAt: now,
+            })
+            .where(eq(goals.id, existing.id))
+            .run();
+        }
+
+        return {
+          result: writeResult(candidate, "persisted", existing.id, "Saved goal"),
           semanticMemory: null,
         };
       }

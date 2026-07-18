@@ -46,7 +46,7 @@ export const InventoryItemCandidateSchema = z.object({
   action: z.enum(["upsert", "remove", "consume"]),
   name: z.string(),
   storageLocation: StorageLocationSchema,
-  quantity: QuantitySchema.nullable(),
+  quantity: QuantitySchema.nullable().optional(),
   notes: z.string().nullable().default(null),
   explicit: z.boolean(),
 });
@@ -97,7 +97,7 @@ export const GoalCandidateSchema = z.object({
     "reduce_waste",
     "other",
   ]),
-  description: z.string(),
+  description: z.string().default(""),
   targetValue: z.number().nullable().default(null),
   targetUnit: z.string().nullable().default(null),
   priority: z.number().int().min(1).max(5).default(1),
@@ -284,6 +284,14 @@ function parseProviderPreferenceCandidate(entry: unknown) {
 }
 
 function repairedProviderCandidate(entry: unknown, error: z.ZodError) {
+  const goalDescriptionIssue = error.issues.some((issue) =>
+    issue.path.length === 1 && issue.path[0] === "description"
+  );
+
+  if (goalDescriptionIssue) {
+    return parseProviderGoalCandidate(entry);
+  }
+
   const severityIssue = error.issues.some((issue) => issue.path.length === 1 && issue.path[0] === "severity");
 
   if (severityIssue) {
@@ -328,6 +336,55 @@ function parseProviderDietaryRestrictionCandidate(entry: unknown) {
     subject: candidate.subject,
     severity: canonicalOrDefaultDietaryRestrictionSeverity(candidate.severity),
     notes: typeof candidate.notes === "string" ? candidate.notes : null,
+    explicit: true,
+  });
+
+  return parsed.success ? parsed.data : null;
+}
+
+function parseProviderGoalCandidate(entry: unknown) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const candidate = entry as Record<string, unknown>;
+  const description = typeof candidate.description === "string" && candidate.description.trim().length > 0
+    ? candidate.description
+    : typeof candidate.subject === "string" && candidate.subject.trim().length > 0
+    ? candidate.subject
+    : null;
+
+  if (candidate.kind !== "goal" || candidate.explicit !== true || description === null) {
+    return null;
+  }
+
+  const goalTypes = new Set([
+    "high_protein",
+    "weight_loss",
+    "budget",
+    "quick_meals",
+    "reduce_waste",
+    "other",
+  ]);
+  const priority = typeof candidate.priority === "number" &&
+    Number.isInteger(candidate.priority) &&
+    candidate.priority >= 1 &&
+    candidate.priority <= 5
+    ? candidate.priority
+    : 3;
+  const parsed = GoalCandidateSchema.safeParse({
+    kind: "goal",
+    scope: "user",
+    action: candidate.action === "deactivate" ? "deactivate" : "upsert",
+    goalType: typeof candidate.goalType === "string" && goalTypes.has(candidate.goalType)
+      ? candidate.goalType
+      : "other",
+    description,
+    targetValue: typeof candidate.targetValue === "number" && Number.isFinite(candidate.targetValue)
+      ? candidate.targetValue
+      : null,
+    targetUnit: typeof candidate.targetUnit === "string" ? candidate.targetUnit : null,
+    priority,
     explicit: true,
   });
 
@@ -385,7 +442,7 @@ export const MemoryExtractionResultProviderSchema = {
               "misc",
             ],
             description:
-              "Durable memory category. Required fields per kind: inventory_item needs name, storageLocation, and quantity; dietary_restriction needs restrictionType, subject, and severity; preference needs subject, sentiment, and strength; goal needs goalType and description; misc needs category and content.",
+              "Durable memory category. Required fields per kind: inventory_item needs name and storageLocation; include quantity only for an inventory upsert. dietary_restriction needs restrictionType, subject, and severity; preference needs subject, sentiment, and strength; goal needs goalType and description; misc needs category and content.",
           },
           scope: {
             type: "string",
@@ -413,7 +470,7 @@ export const MemoryExtractionResultProviderSchema = {
             nullable: true,
             properties: QuantityProviderSchema.properties,
             required: QuantityProviderSchema.required,
-            description: "Inventory quantity, or null when unstated.",
+            description: "Inventory quantity for an upsert. Omit it for remove and consume actions.",
           },
           restrictionType: {
             type: "string",
@@ -422,7 +479,7 @@ export const MemoryExtractionResultProviderSchema = {
           },
           subject: {
             type: "string",
-            description: "Restriction, preference, or goal subject.",
+            description: "Dietary restriction or preference subject.",
           },
           severity: {
             type: "string",
@@ -454,7 +511,7 @@ export const MemoryExtractionResultProviderSchema = {
           },
           description: {
             type: "string",
-            description: "Goal description.",
+            description: "Required description of the explicit goal. Do not use subject for goals.",
           },
           targetValue: {
             type: "number",

@@ -37,6 +37,8 @@ export const PromptName = {
   ScopedInventorySplit: "scoped-inventory-split",
   OrganizationPlan: "organization-plan",
   SeededBoundingBoxIdentification: "seeded-bounding-box-identification",
+  EvalQueryAnswerGroundedness: "eval-query-answer-groundedness",
+  EvalScanSemanticGrounding: "eval-scan-semantic-grounding",
 } as const;
 
 export type PromptName = (typeof PromptName)[keyof typeof PromptName];
@@ -76,7 +78,13 @@ export type PromptBundle = {
   seededBoundingBoxIdentification: LoadedPrompt<BaseChatPromptTemplate>;
 };
 
+export type EvalPromptBundle = PromptBundle & {
+  evalQueryAnswerGroundedness: LoadedPrompt<BaseChatPromptTemplate>;
+  evalScanSemanticGrounding: LoadedPrompt<BaseChatPromptTemplate>;
+};
+
 let promptBundlePromise: Promise<PromptBundle> | null = null;
+let evalPromptBundlePromise: Promise<EvalPromptBundle> | null = null;
 
 async function hubPrompt<TPrompt extends Runnable>(
   name: PromptName,
@@ -135,6 +143,31 @@ export function loadPromptBundle(): Promise<PromptBundle> {
     });
   }
   return promptBundlePromise;
+}
+
+export function loadEvalPromptBundle(): Promise<EvalPromptBundle> {
+  if (!evalPromptBundlePromise) {
+    evalPromptBundlePromise = loadEvalPromptBundleUncached().catch((error) => {
+      evalPromptBundlePromise = null;
+      throw error;
+    });
+  }
+  return evalPromptBundlePromise;
+}
+
+async function loadEvalPromptBundleUncached(): Promise<EvalPromptBundle> {
+  const prompt = getLangSmithConfig() ? hubPrompt : bundledPrompt;
+  const [bundle, evalQueryAnswerGroundedness, evalScanSemanticGrounding] = await Promise.all([
+    loadPromptBundle(),
+    prompt<BaseChatPromptTemplate>(PromptName.EvalQueryAnswerGroundedness),
+    prompt<BaseChatPromptTemplate>(PromptName.EvalScanSemanticGrounding),
+  ]);
+
+  return {
+    ...bundle,
+    evalQueryAnswerGroundedness,
+    evalScanSemanticGrounding,
+  };
 }
 
 async function loadPromptBundleUncached(): Promise<PromptBundle> {

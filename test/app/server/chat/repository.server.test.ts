@@ -5,6 +5,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  clearChats,
+  completeChatAssistantMessage,
   createChat,
   getChat,
   getOrCreateLatestChat,
@@ -113,6 +115,54 @@ describe("chat persistence", () => {
     expect(resumed.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: assistantMessageId, status: "running", payload: { text: "How many eggs are left?" } }),
     ]));
+  }));
+
+  it("ends a failed assistant turn without replacing its stored response", () => withTestDatabase(() => {
+    const chat = createChat(scope);
+    const assistantMessageId = randomUUID();
+    startChatTurn({
+      ...scope,
+      threadId: chat.id,
+      userMessage: { id: randomUUID(), role: "user", payload: { text: "Continue the plan." } },
+      assistantMessage: { id: assistantMessageId, role: "assistant", payload: { text: "" } },
+    });
+    updateChatAssistantMessage({
+      ...scope,
+      threadId: chat.id,
+      assistantMessageId,
+      payload: { text: "The first step is still valid." },
+      status: "running",
+    });
+
+    completeChatAssistantMessage({ ...scope, threadId: chat.id, assistantMessageId });
+
+    expect(getChat(chat.id, scope)).toMatchObject({
+      executionStatus: "idle",
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: assistantMessageId,
+          status: "idle",
+          payload: { text: "The first step is still valid." },
+        }),
+      ]),
+    });
+  }));
+
+  it("deletes every stored chat in the current scope before creating its replacement", () => withTestDatabase(() => {
+    const first = createChat(scope);
+    const second = createChat(scope);
+    const otherScope = { ...scope, imageId: "image-2" };
+    const other = createChat(otherScope);
+
+    const cleared = clearChats(scope);
+
+    expect(cleared.id).not.toBe(first.id);
+    expect(cleared.id).not.toBe(second.id);
+    expect(cleared.messages).toHaveLength(1);
+    expect(() => getChat(first.id, scope)).toThrow(/was not found for this fridge/);
+    expect(() => getChat(second.id, scope)).toThrow(/was not found for this fridge/);
+    expect(getOrCreateLatestChat(scope).id).toBe(cleared.id);
+    expect(getChat(other.id, otherScope).id).toBe(other.id);
   }));
 
   it("returns compact completed chat messages for query context", () => withTestDatabase(() => {

@@ -136,7 +136,7 @@
     "messages": [
       {
         "role": "system",
-        "content": "Extract durable memory candidates from the user's message. Include explicit dietary restrictions, allergies, preferences, goals, and durable household facts. Include explicit inventory item changes as inventory_item candidates with scope fridge: use remove when the user asks to delete, remove, or correct away an item, and consume when the user says an item was eaten, used up, finished, or is gone. For inventory_item candidates, use the stated storage location when present and fridge otherwise. Any dietary restrictions are dietary_restriction candidates with scope user. Use restrictionType allergy, intolerance, religious, medical, and other for dietary restrictions that do not fit those categories. Do not extract temporary facts. Use remove, consume, or deactivate actions only when the user explicitly says an existing memory or inventory item is no longer true."
+        "content": "Extract only explicit durable facts; ignore temporary statements. Save dietary restrictions, preferences, goals, household facts, and inventory changes. Every explicitly stated ongoing personal or household outcome is a goal and must produce one schema-valid goal candidate, even without a numeric target. Put its complete outcome in description, never subject. For inventory changes, use the stated location or fridge. A direct retraction, reversal, or statement that a food constraint no longer matters must produce a preference remove candidate for that constraint. Treat a newly stated opposite food preference as replacing the earlier constraint on the same ingredient or food topic. Use remove, consume, or deactivate only when the user explicitly says an existing fact is no longer true. Return only schema-valid candidates."
       },
       {
         "role": "human",
@@ -296,5 +296,17 @@
     "description": "Identify a user-selected inventory crop",
     "templateFormat": "mustache",
     "messages": [{ "role": "system", "content": "Identify the single visible household food-storage inventory object in the user-selected crop. Return only what is visually supported by the crop. Use a generic but specific label when product identity is unclear. Do not infer hidden quantity, expiration, brand, or opened state from outside the crop." }, { "role": "human", "content": [{ "type": "text", "text": "{{seeded_bounding_box_context_json}}" }, { "type": "image_url", "image_url": { "url": "{{image_data_url}}" } }] }]
+  },
+  {
+    "name": "eval-query-answer-groundedness",
+    "description": "Grade whether a FridgeFriend answer is grounded in the supplied evaluation evidence",
+    "templateFormat": "mustache",
+    "messages": [{ "role": "system", "content": "Evaluate the answer only against the supplied query, permitted facts, required facts, and prohibited claims. Do not infer missing facts. Return structured fields score from 0 to 1, pass, unsupportedClaims, missingRequiredClaims, and reasoning. Set pass false if any unsupported critical claim appears or score is below 0.90." }, { "role": "human", "content": "{{eval_query_answer_context_json}}" }]
+  },
+  {
+    "name": "eval-scan-semantic-grounding",
+    "description": "Grade semantic grounding of a FridgeFriend scan against annotated image evidence",
+    "templateFormat": "mustache",
+    "messages": [{ "role": "system", "content": "Inspect the supplied storage image, reference annotations, and scan output. Grade only semantic item identity and support-zone grounding. Do not judge geometry measurements or graph routing. Return structured fields semanticDetectionScore, semanticZoneScore, unsupportedIdentifications, and reasoning. Scores are from 0 to 1." }, { "role": "human", "content": [{ "type": "text", "text": "{{eval_scan_semantic_context_json}}" }, { "type": "image_url", "image_url": { "url": "{{image_data_url}}" } }] }]
   }
 ]

@@ -25,10 +25,22 @@ export function createQueryStreamResponse(
   persistence: QueryStreamPersistence = {},
 ) {
   const encoder = new TextEncoder();
+  let cancelled = false;
 
   return new Response(
     new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
       async start(controller) {
+        const enqueue = (event: QueryStreamEvent) => {
+          if (cancelled || controller.desiredSize === null) {
+            return false;
+          }
+          controller.enqueue(encoder.encode(encodeStreamEvent(event)));
+          return true;
+        };
+
         try {
           for await (const event of streamFactory(input)) {
             if (event.type === "final") {
@@ -41,21 +53,24 @@ export function createQueryStreamResponse(
             ) {
               await persistence.onInterrupted?.(event);
             }
-            controller.enqueue(encoder.encode(encodeStreamEvent(event)));
+            if (event.type === "error") {
+              await persistence.onError?.(event.error);
+            }
+            if (!enqueue(event) || event.type === "error") {
+              return;
+            }
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await persistence.onError?.(message);
-          controller.enqueue(
-            encoder.encode(
-              encodeStreamEvent({
-                type: "error",
-                error: `Query graph invocation failed: ${message}`,
-              }),
-            ),
-          );
+          enqueue({
+            type: "error",
+            error: `Query graph invocation failed: ${message}`,
+          });
         } finally {
-          controller.close();
+          if (!cancelled && controller.desiredSize !== null) {
+            controller.close();
+          }
         }
       },
     }),

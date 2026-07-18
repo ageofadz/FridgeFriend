@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CHATBOX_EXAMPLE_PROMPTS, finalAssistantMessageText, groceryPlanCsv, hasAssistantResponseContent, loadingFoodEmojis, organizationPlanArtifactCopy, withoutHitlLoadingState } from "../../../app/components/FridgeQueryChat";
+import { CHATBOX_EXAMPLE_PROMPTS, finalAssistantMessageText, groceryPlanCsv, hasAssistantResponseContent, loadingFoodEmojis, organizationPlanArtifactCopy, withoutHitlLoadingState, withoutQueryFailureState } from "../../../app/components/FridgeQueryChat";
 
 describe("chatbox example prompts", () => {
   it("keeps the suggestion set in the requested range with ellipsis endings", () => {
@@ -128,6 +128,31 @@ describe("chat loading visibility", () => {
     });
     expect(hasAssistantResponseContent(message)).toBe(false);
   });
+
+  it("clears query loading state without turning an internal failure into chat content", () => {
+    const message = withoutQueryFailureState({
+      id: "assistant-1",
+      role: "assistant",
+      text: "",
+      statusLines: ["respond: Generating response."],
+      streaming: true,
+      groceryPlanPending: true,
+      groceryPlanStage: "building_list",
+      pantryCompletionPending: true,
+      pantryCompletionStage: "assigning_aisles",
+    });
+
+    expect(message).toMatchObject({
+      text: "",
+      statusLines: undefined,
+      streaming: false,
+      groceryPlanPending: false,
+      groceryPlanStage: undefined,
+      pantryCompletionPending: false,
+      pantryCompletionStage: undefined,
+    });
+    expect(hasAssistantResponseContent(message)).toBe(false);
+  });
 });
 
 describe("final assistant message text", () => {
@@ -160,6 +185,7 @@ describe("final assistant message text", () => {
       visualEvidence: [],
       dietaryRestrictions: [],
       dietaryPreferences: [],
+      activeGoals: [],
     })).toBe("I made a grocery plan from the selected meals.");
   });
 });

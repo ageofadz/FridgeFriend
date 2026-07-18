@@ -36,6 +36,7 @@ describe("query API stream response", () => {
         visualEvidence: [],
         dietaryRestrictions: [],
         dietaryPreferences: [],
+        activeGoals: [],
       } as const;
     }
 
@@ -49,17 +50,22 @@ describe("query API stream response", () => {
       { type: "recipe_tournament_started", candidateCount: 2, displaySlotCount: 2 },
       { type: "token", text: "Hello" },
       { type: "token", text: " world" },
-      { type: "final", answer: "Hello world", intent: "recipe", recipes: [], visualEvidence: [], dietaryRestrictions: [], dietaryPreferences: [] },
+      { type: "final", answer: "Hello world", intent: "recipe", recipes: [], visualEvidence: [], dietaryRestrictions: [], dietaryPreferences: [], activeGoals: [] },
     ]);
   });
 
-  it("streams specific error events when invocation fails", async () => {
+  it("streams specific error events and persists the failure state when invocation fails", async () => {
     async function* streamFactory(): AsyncGenerator<QueryStreamEvent> {
       yield { type: "status", message: "Starting query graph." } as const;
       throw new Error("Food.com recipe Chroma search failed: connection refused");
     }
 
-    const response = createQueryStreamResponse(input, streamFactory);
+    let persistedError: string | undefined;
+    const response = createQueryStreamResponse(input, streamFactory, {
+      onError(error) {
+        persistedError = error;
+      },
+    });
 
     expect(await responseLines(response)).toEqual([
       { type: "status", message: "Starting query graph." },
@@ -69,6 +75,63 @@ describe("query API stream response", () => {
           "Query graph invocation failed: Food.com recipe Chroma search failed: connection refused",
       },
     ]);
+    expect(persistedError).toBe("Food.com recipe Chroma search failed: connection refused");
+  });
+
+  it("persists graph-produced errors before closing the stream", async () => {
+    async function* streamFactory(): AsyncGenerator<QueryStreamEvent> {
+      yield { type: "error", error: "Query graph completed without an answer" } as const;
+    }
+
+    let persistedError: string | undefined;
+    const response = createQueryStreamResponse(input, streamFactory, {
+      onError(error) {
+        persistedError = error;
+      },
+    });
+
+    expect(await responseLines(response)).toEqual([
+      { type: "error", error: "Query graph completed without an answer" },
+    ]);
+    expect(persistedError).toBe("Query graph completed without an answer");
+  });
+
+  it("does not report an error after the client cancels the stream", async () => {
+    let releaseStream: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    let markFinished: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      markFinished = resolve;
+    });
+
+    async function* streamFactory(): AsyncGenerator<QueryStreamEvent> {
+      markStarted?.();
+      try {
+        await new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        yield { type: "status", message: "Starting query graph." } as const;
+      } finally {
+        markFinished?.();
+      }
+    }
+
+    let persistedError: string | undefined;
+    const response = createQueryStreamResponse(input, streamFactory, {
+      onError(error) {
+        persistedError = error;
+      },
+    });
+
+    await started;
+    await response.body?.cancel();
+    releaseStream?.();
+    await finished;
+
+    expect(persistedError).toBeUndefined();
   });
 
   it("streams with no selected image", async () => {
@@ -82,6 +145,7 @@ describe("query API stream response", () => {
         visualEvidence: [],
         dietaryRestrictions: [],
         dietaryPreferences: [],
+        activeGoals: [],
       } as const;
     }
 
@@ -99,6 +163,7 @@ describe("query API stream response", () => {
         visualEvidence: [],
         dietaryRestrictions: [],
         dietaryPreferences: [],
+        activeGoals: [],
       },
     ]);
   });

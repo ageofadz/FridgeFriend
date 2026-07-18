@@ -73,22 +73,42 @@ flowchart TD
     Load["load_context"]
     SeededAssert["apply_seeded_inventory_assertions"]
     Intent["determine_intent"]
-    Memory["extract and validate memory"]
-    MutationReview["HITL mutation approval"]
-    MemoryWrite["write, index,<br/>reload memory"]
+    MemoryExtract["extract_memory_candidates"]
+    MemoryValidate["validate_memory_candidates"]
+    MemoryWrite["apply_memory_writes"]
+    MemoryIndex["index_semantic_memory"]
+    MemoryReload["reload_memory_context"]
+    IntentReady["intent_ready_for_memory"]
+    MemoryCandidatesReady["memory_candidates_ready"]
+    MemoryJoin["continue_after_memory_classification"]
+    AwaitMemory["await_memory_before_intent"]
+    MemoryReady["memory_ready_for_intent"]
+    IntentJoin["continue_after_memory"]
+    MemoryDone["memory_lane_finished"]
+    ResponseDone["response_lane_finished"]
     Inventory["query_inventory"]
-    SplitProposal["propose scoped inventory split"]
-    Enrich["assess enrichment"]
-    FocusedVLM["focused VLM crop"]
-    HumanReview["human clarification"]
-    PersistEnrichment["persist enrichment"]
+    SplitProposal["propose_scoped_inventory_split"]
+    Enrich["assess_inventory_enrichment"]
+    FocusedVLM["run_focused_inventory_enrichment"]
+    HumanReview["request_inventory_clarification"]
+    PersistEnrichment["persist_inventory_enrichment"]
     RecipeSearch["build recipe search"]
-    RecipeRAG["retrieve, rank, grade,<br/>rewrite recipes"]
-    Tournament["recipe tournament"]
-    Plans["expiry, grocery, pantry,<br/>organization, placement, space"]
+    Retrieve["retrieve_recipes"]
+    Rank["rank_retrieved_recipes"]
+    Grade["grade_recipe_retrieval"]
+    Rewrite["rewrite_recipe_query"]
+    Evaluate["evaluate_recipe<br/>(fan-out)"]
+    Tournament["resolve_recipe_tournament"]
+    Expiry["plan_expiry"]
+    Grocery["plan_groceries"]
+    Pantry["plan_pantry_completion"]
+    Organization["plan_organization"]
+    Placement["plan_placement_correction"]
+    Space["calculate_space"]
+    Clarification["request_clarification"]
     Respond["respond"]
     Workspace["plan_workspace_actions"]
-    SplitReview["HITL split review"]
+    SplitReview["review_inventory_split"]
   end
 
   Store["SQLite<br/>images, inventories, memory, checkpoints"]
@@ -109,34 +129,55 @@ flowchart TD
   Reconcile --> ScanFailed
   FinalizeScan --> Store
 
-  UI --> QueryAPI --> Load --> SeededAssert --> Intent
-  Intent -- "inventory memory update" --> Memory
-  Intent -- "inventory / recipe / shopping / expiry / organization / placement" --> Inventory
-  Intent -- "food knowledge / general chat" --> Respond
-  Intent -- "space" --> Plans
-  Intent -- "clarification" --> UI
-  Memory --> MutationReview
-  Memory --> MemoryWrite
-  MutationReview --> MemoryWrite
-  MemoryWrite --> Inventory
-  MemoryWrite --> Respond
-  MemoryWrite --> Workspace
-  Inventory --> SplitProposal --> Enrich
-  Inventory --> Enrich
-  Enrich --> FocusedVLM --> PersistEnrichment --> Enrich
-  Enrich --> HumanReview --> PersistEnrichment
-  Enrich --> RecipeSearch
-  Enrich --> Plans
-  Enrich --> Respond
-  RecipeSearch --> RecipeRAG
-  RecipeRAG --> RecipeSearch
-  RecipeRAG --> Tournament --> Respond
-  RecipeRAG --> Plans
-  Plans --> RecipeSearch
-  Plans --> Respond
-  Respond -- "profile memory update" --> Memory
-  Respond --> Workspace --> SplitReview --> UI
-  Workspace --> UI
+  UI --> QueryAPI --> Load --> SeededAssert
+  SeededAssert --> Intent --> IntentReady
+  SeededAssert --> MemoryExtract --> MemoryCandidatesReady
+  IntentReady --> MemoryJoin
+  MemoryCandidatesReady --> MemoryJoin
+  MemoryExtract --> MemoryValidate --> MemoryWrite --> MemoryIndex --> MemoryReload
+  MemoryJoin -- "recipe, shopping, food knowledge,<br/>or consume/remove memory mutation" --> AwaitMemory
+  MemoryReload -- "memory required" --> MemoryReady --> IntentJoin
+  AwaitMemory --> IntentJoin
+  MemoryJoin -- "inventory, expiry, organization,<br/>or placement correction" --> Inventory
+  IntentJoin -- "inventory, expiry, recipe, shopping,<br/>organization, or placement correction" --> Inventory
+  IntentJoin -- "food knowledge / general chat" --> Respond
+  MemoryJoin -- "general chat" --> Respond
+  MemoryJoin -- "space" --> Space --> Respond
+  IntentJoin -- "space" --> Space
+  MemoryJoin -- "clarification" --> Clarification
+  IntentJoin -- "clarification" --> Clarification
+
+  Inventory -- "inventory only" --> SplitProposal --> Enrich
+  Inventory -- "other inventory-backed intents" --> Enrich
+  Enrich -- "needs focused visual evidence" --> FocusedVLM --> PersistEnrichment --> Enrich
+  Enrich -- "needs user input" --> HumanReview --> PersistEnrichment
+  Enrich -- "recipe / shopping" --> RecipeSearch
+  Enrich -- "expiry" --> Expiry
+  Enrich -- "organization" --> Organization --> Respond
+  Enrich -- "placement correction" --> Placement --> Respond
+  Enrich -- "answer ready" --> Respond
+  Expiry -- "prioritized ingredients" --> RecipeSearch
+  Expiry -- "otherwise" --> Respond
+
+  RecipeSearch -- "needs clarification" --> Clarification
+  RecipeSearch --> Retrieve --> Rank --> Grade
+  Grade -- "retry with a rewritten query" --> Rewrite --> Retrieve
+  Grade -- "relevant candidates" --> Evaluate --> Tournament
+  Grade -- "no viable candidates" --> Respond
+  Grade -- "grocery plan" --> Grocery --> Respond
+  Grade -- "pantry completion" --> Pantry --> Respond
+  Tournament -- "grocery plan" --> Grocery
+  Tournament -- "pantry completion" --> Pantry
+  Tournament --> Respond
+
+  Clarification --> QueryEnd((END))
+  Respond -- "memory-independent response" --> ResponseDone
+  MemoryReload -- "memory-independent response" --> MemoryDone
+  Respond -- "memory-required response" --> Workspace
+  ResponseDone --> Workspace
+  MemoryDone --> Workspace
+  Workspace -- "split review needed" --> SplitReview --> QueryEnd
+  Workspace --> QueryEnd
 
   Scan --> Gemini
   Query --> Gemini

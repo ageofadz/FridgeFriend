@@ -14,13 +14,13 @@ describe("query stream parser", () => {
 
     parser.push('{"type":"status","message":"Start"}\n{"type":"tok');
     parser.push('en","text":"Hel');
-    parser.push('lo"}\n{"type":"final","answer":"Hello","intent":null,"recipes":[],"visualEvidence":[],"dietaryRestrictions":[],"dietaryPreferences":[]}\n');
+    parser.push('lo"}\n{"type":"final","answer":"Hello","intent":null,"recipes":[],"visualEvidence":[],"dietaryRestrictions":[],"dietaryPreferences":[],"activeGoals":[]}\n');
     parser.close();
 
     expect(events).toEqual([
       { type: "status", message: "Start", node: undefined },
       { type: "token", text: "Hello" },
-      { type: "final", answer: "Hello", intent: null, recipes: [], visualEvidence: [], dietaryRestrictions: [], dietaryPreferences: [] },
+      { type: "final", answer: "Hello", intent: null, recipes: [], visualEvidence: [], dietaryRestrictions: [], dietaryPreferences: [], activeGoals: [] },
     ]);
   });
 

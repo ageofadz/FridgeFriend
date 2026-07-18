@@ -69,6 +69,49 @@ describe("MemoryExtractionResultSchema", () => {
     expect(warn.mock.calls[0][0]).toContain("kind=dietary_restriction action=consume");
   });
 
+  it("accepts explicit inventory removals without a quantity", () => {
+    const parsed = MemoryExtractionResultSchema.parse({
+      candidates: [{
+        kind: "inventory_item",
+        scope: "fridge",
+        action: "remove",
+        name: "carrots",
+        storageLocation: "fridge",
+        explicit: true,
+      }],
+    });
+
+    expect(parsed.candidates).toEqual([
+      expect.objectContaining({
+        kind: "inventory_item",
+        action: "remove",
+        name: "carrots",
+      }),
+    ]);
+    expect(parsed.candidates[0]).not.toHaveProperty("quantity");
+  });
+
+  it("keeps explicit goals without a provider description for query-level hydration", () => {
+    const parsed = MemoryExtractionResultSchema.parse({
+      candidates: [{
+        kind: "goal",
+        scope: "user",
+        action: "upsert",
+        explicit: true,
+        goalType: "weight_loss",
+        priority: 3,
+        targetValue: null,
+      }],
+    });
+
+    expect(parsed.candidates).toEqual([expect.objectContaining({
+      kind: "goal",
+      goalType: "weight_loss",
+      description: "",
+      priority: 3,
+    })]);
+  });
+
   it("normalizes provider preference sentiment vocabulary before strict parsing", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const parsed = MemoryExtractionResultSchema.parse({

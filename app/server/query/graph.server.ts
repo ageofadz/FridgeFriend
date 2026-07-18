@@ -41,10 +41,10 @@ import { createPlanPlacementCorrectionNode } from "./nodes/plan-placement-correc
 import { validateMemoryCandidatesNode } from "./nodes/validate-memory-candidates.node";
 import {
   routeIntent,
-  routeIntentOrInventoryMemory,
-  routePostResponseMemory,
-  routeAfterMemoryReload,
+  routeAfterConcurrentResponse,
+  routeAfterMemoryClassification,
   routeAfterInventoryEnrichment,
+  routeMemoryLaneCompletion,
   routeRecipeRetrievalGrade,
   routeRecipeQueryRewrite,
   routeRecipeSearch,
@@ -55,6 +55,7 @@ import {
 import type {
   DietaryPreferenceMemory,
   DietaryRestrictionMemory,
+  GoalMemory,
 } from "../memory/schemas";
 import type {
   QueryGraphDependencies,
@@ -123,6 +124,12 @@ function normalizeQueryInput(input: QueryGraphInput) {
     userId: input.userId?.trim() || DEFAULT_USER_ID,
     threadId,
     requestId: input.requestId?.trim() ?? "",
+    intent: null,
+    recipeSearch: null,
+    recipeClarification: null,
+    recipeSearchError: null,
+    recipeCandidates: [],
+    recipeInputIngredients: [],
     answer: null,
     visualEvidence: [],
     recipeRewriteCount: 0,
@@ -131,7 +138,24 @@ function normalizeQueryInput(input: QueryGraphInput) {
     tournamentCandidates: [],
     tournamentCandidate: null,
     tournamentEvaluations: new Overwrite([]),
+    memoryCandidates: [],
+    memoryValidations: [],
+    memoryWriteResults: [],
+    pendingSemanticMemories: [],
+    indexedSemanticMemoryIds: [],
+    completedOperationKeys: [],
+    externalInventory: [],
+    dietaryRestrictions: [],
+    dietaryPreferences: [],
+    activeGoals: [],
+    semanticMemories: [],
     context: {
+      memoryExtractionCompleted: false,
+      memoryExtractionError: null,
+      memoryWriteResults: [],
+      memoryWriteVerification: null,
+      memoryWriteVerificationError: null,
+      scannedInventoryMutations: [],
       recipeContinuationRequested: input.recipeContinuation === true,
       conversationContext: input.conversationContext ?? {
         selectedItemIds: [],
@@ -145,6 +169,10 @@ function normalizeQueryInput(input: QueryGraphInput) {
 }
 
 export function createQueryGraph(deps: QueryGraphDependencies = {}) {
+  const graphCheckpointer = deps.checkpointer === undefined
+    ? checkpointer
+    : deps.checkpointer;
+
   return new StateGraph(FridgeQueryState)
     .addNode("load_context", createLoadFridgeContextNode(deps))
     .addNode("apply_seeded_inventory_assertions", createApplySeededInventoryAssertionsNode(deps), {
@@ -165,6 +193,14 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       retryPolicy: queryGraphModelRetryPolicy,
     })
     .addNode("reload_memory_context", createReloadMemoryContextNode(deps))
+    .addNode("await_memory_before_intent", async () => ({}))
+    .addNode("intent_ready_for_memory", async () => ({}))
+    .addNode("memory_candidates_ready", async () => ({}))
+    .addNode("continue_after_memory_classification", async () => ({}))
+    .addNode("memory_ready_for_intent", async () => ({}))
+    .addNode("continue_after_memory", async () => ({}))
+    .addNode("memory_lane_finished", async () => ({}))
+    .addNode("response_lane_finished", async () => ({}))
     .addNode("determine_intent", createDetermineIntentNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
@@ -217,10 +253,13 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     })
     .addEdge(START, "load_context")
     .addEdge("load_context", "apply_seeded_inventory_assertions")
+    .addEdge("apply_seeded_inventory_assertions", "extract_memory_candidates")
     .addEdge("apply_seeded_inventory_assertions", "determine_intent")
-    .addConditionalEdges("determine_intent", routeIntentOrInventoryMemory, {
+    .addEdge("extract_memory_candidates", "memory_candidates_ready")
+    .addEdge("determine_intent", "intent_ready_for_memory")
+    .addEdge(["intent_ready_for_memory", "memory_candidates_ready"], "continue_after_memory_classification")
+    .addConditionalEdges("continue_after_memory_classification", routeAfterMemoryClassification, {
       inventory: "query_inventory",
-      memory_update: "extract_memory_candidates",
       expiry: "query_inventory",
       food_knowledge: "respond",
       recipe: "query_inventory",
@@ -230,12 +269,18 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       placement_correction: "query_inventory",
       general_chat: "respond",
       clarification: "request_clarification",
+      await_memory_before_intent: "await_memory_before_intent",
     })
     .addEdge("extract_memory_candidates", "validate_memory_candidates")
     .addEdge("validate_memory_candidates", "apply_memory_writes")
     .addEdge("apply_memory_writes", "index_semantic_memory")
     .addEdge("index_semantic_memory", "reload_memory_context")
-    .addConditionalEdges("reload_memory_context", routeAfterMemoryReload, {
+    .addConditionalEdges("reload_memory_context", routeMemoryLaneCompletion, {
+      memory_ready_for_intent: "memory_ready_for_intent",
+      memory_lane_finished: "memory_lane_finished",
+    })
+    .addEdge(["await_memory_before_intent", "memory_ready_for_intent"], "continue_after_memory")
+    .addConditionalEdges("continue_after_memory", routeIntent, {
       inventory: "query_inventory",
       expiry: "query_inventory",
       food_knowledge: "respond",
@@ -246,7 +291,6 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       placement_correction: "query_inventory",
       general_chat: "respond",
       clarification: "request_clarification",
-      plan_workspace_actions: "plan_workspace_actions",
     })
     .addConditionalEdges("query_inventory", routeInventorySplitProposal, {
       propose_scoped_inventory_split: "propose_scoped_inventory_split",
@@ -300,18 +344,17 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
     .addEdge("plan_placement_correction", "respond")
     .addEdge("calculate_space", "respond")
     .addEdge("request_clarification", END)
-    .addConditionalEdges("respond", routePostResponseMemory, {
-      extract_memory_candidates: "extract_memory_candidates",
+    .addConditionalEdges("respond", routeAfterConcurrentResponse, {
       plan_workspace_actions: "plan_workspace_actions",
+      response_lane_finished: "response_lane_finished",
     })
+    .addEdge(["response_lane_finished", "memory_lane_finished"], "plan_workspace_actions")
     .addConditionalEdges("plan_workspace_actions", routeScopedInventorySplitReview, {
       review: "review_inventory_split",
       end: END,
     })
     .addEdge("review_inventory_split", END)
-    .compile({
-      checkpointer,
-    });
+    .compile(graphCheckpointer ? { checkpointer: graphCheckpointer } : undefined);
 }
 
 function graphInterrupts(result: unknown): Array<Record<string, unknown>> {
@@ -409,6 +452,11 @@ const NODE_STATUS_MESSAGES: Record<string, [active: string, done: string]> = {
   apply_memory_writes: ["Checking durable memory writes.", "Checked durable memory writes."],
   index_semantic_memory: ["Checking semantic memory indexing.", "Checked semantic memory indexing."],
   reload_memory_context: ["Reloading durable memory context.", "Checked durable memory context."],
+  await_memory_before_intent: ["Waiting for your profile update.", "Profile update is ready."],
+  memory_ready_for_intent: ["Preparing verified profile context.", "Prepared verified profile context."],
+  continue_after_memory: ["Applying profile context.", "Applied profile context."],
+  memory_lane_finished: ["Finishing profile update.", "Finished profile update."],
+  response_lane_finished: ["Finishing response.", "Finished response."],
   determine_intent: ["Understanding the request.", "Understood the request."],
   query_inventory: ["Preparing inventory lookup.", "Prepared inventory lookup."],
   propose_scoped_inventory_split: ["Checking the selected area for separate inventory items.", "Checked the selected area for separate inventory items."],
@@ -441,14 +489,61 @@ function nodeStatusMessage(node: string) {
 
 function memoryWriteResultsFromUpdate(update: Record<string, unknown>) {
   return Array.isArray(update.memoryWriteResults)
-    ? update.memoryWriteResults.filter((entry): entry is { status: string; message?: string } =>
-      isRecord(entry) && typeof entry.status === "string"
+    ? update.memoryWriteResults.filter((entry): entry is { kind: string; action: string; status: string; message?: string } =>
+      isRecord(entry) &&
+      typeof entry.kind === "string" &&
+      typeof entry.action === "string" &&
+      typeof entry.status === "string"
     )
     : [];
 }
 
 function memoryVerificationFromContext(context: Record<string, unknown>) {
   return isRecord(context.memoryWriteVerification) ? context.memoryWriteVerification : null;
+}
+
+function memoryUpdateFromReload(input: {
+  update: Record<string, unknown>;
+  context: Record<string, unknown>;
+}) {
+  const verification = memoryVerificationFromContext(input.context);
+
+  if (
+    !verification ||
+    (verification.status !== "verified" && verification.status !== "failed") ||
+    typeof verification.message !== "string"
+  ) {
+    return null;
+  }
+  const status = verification.status as "verified" | "failed";
+
+  const changedKinds = [...new Set(memoryWriteResultsFromUpdate(input.update)
+    .map((write) => write.kind)
+    .filter((kind): kind is "inventory_item" | "dietary_restriction" | "preference" | "goal" | "misc" =>
+      kind === "inventory_item" ||
+      kind === "dietary_restriction" ||
+      kind === "preference" ||
+      kind === "goal" ||
+      kind === "misc"
+    ))];
+
+  return {
+    type: "memory_update" as const,
+    status,
+    message: status === "verified"
+      ? "Profile update saved."
+      : `Profile update failed: ${verification.message}`,
+    changedKinds,
+    dietaryRestrictions: Array.isArray(input.update.dietaryRestrictions)
+      ? input.update.dietaryRestrictions as DietaryRestrictionMemory[]
+      : [],
+    dietaryPreferences: Array.isArray(input.update.dietaryPreferences)
+      ? input.update.dietaryPreferences as DietaryPreferenceMemory[]
+      : [],
+    activeGoals: Array.isArray(input.update.activeGoals)
+      ? input.update.activeGoals as GoalMemory[]
+      : [],
+  };
 }
 
 function nodeStatusMessageForUpdate(
@@ -735,6 +830,7 @@ export async function* streamQueryForFridgeImage(
   let finalOrganizationPlan: OrganizationPlan | undefined;
   let finalDietaryRestrictions: DietaryRestrictionMemory[] = [];
   let finalDietaryPreferences: DietaryPreferenceMemory[] = [];
+  let finalActiveGoals: GoalMemory[] = [];
   let finalRecipeRetrievalAudit: z.infer<typeof RecipeRetrievalAuditSchema> | undefined;
   let tournamentCandidates: RankedRecipe[] = [];
   let tournamentEvaluations: RecipeTournamentEvaluation[] = [];
@@ -852,6 +948,10 @@ export async function* streamQueryForFridgeImage(
           finalDietaryPreferences = update.dietaryPreferences as DietaryPreferenceMemory[];
         }
 
+        if (Array.isArray(update.activeGoals)) {
+          finalActiveGoals = update.activeGoals as GoalMemory[];
+        }
+
         const recipeRetrievalAudit = RecipeRetrievalAuditSchema.safeParse(update.recipeRetrievalAudit);
         if (recipeRetrievalAudit.success) {
           finalRecipeRetrievalAudit = recipeRetrievalAudit.data;
@@ -873,6 +973,13 @@ export async function* streamQueryForFridgeImage(
         if (node === "apply_memory_writes") {
           for (const inventory of scannedInventoryMutationInventories(context)) {
             yield { type: "inventory_updated", inventory };
+          }
+        }
+
+        if (node === "reload_memory_context") {
+          const memoryUpdate = memoryUpdateFromReload({ update, context });
+          if (memoryUpdate) {
+            yield memoryUpdate;
           }
         }
 
@@ -1048,6 +1155,7 @@ export async function* streamQueryForFridgeImage(
         visualEvidence: finalVisualEvidence,
         dietaryRestrictions: finalDietaryRestrictions,
         dietaryPreferences: finalDietaryPreferences,
+        activeGoals: finalActiveGoals,
         workspaceActions: finalWorkspaceActions,
         agentEvents: [],
         retrievalAudit: finalRecipeRetrievalAudit,
@@ -1076,6 +1184,7 @@ export async function* streamQueryForFridgeImage(
     visualEvidence: finalVisualEvidence,
     dietaryRestrictions: finalDietaryRestrictions,
     dietaryPreferences: finalDietaryPreferences,
+    activeGoals: finalActiveGoals,
     workspaceActions: finalWorkspaceActions,
     agentEvents: [],
     retrievalAudit: finalRecipeRetrievalAudit,
@@ -1113,6 +1222,7 @@ export async function* continueQueryForFridgeThread(
       visualEvidence: isQueryVisualEvidence(values.visualEvidence) ? values.visualEvidence : [],
       dietaryRestrictions: Array.isArray(values.dietaryRestrictions) ? values.dietaryRestrictions : [],
       dietaryPreferences: Array.isArray(values.dietaryPreferences) ? values.dietaryPreferences : [],
+      activeGoals: Array.isArray(values.activeGoals) ? values.activeGoals : [],
       workspaceActions: workspaceActionsFromContext(context),
       agentEvents: [],
       retrievalAudit: RecipeRetrievalAuditSchema.safeParse(values.recipeRetrievalAudit).data,

@@ -27,20 +27,57 @@ export function routeIntentOrMemory(
   return routeIntent(state);
 }
 
-export function routeIntentOrInventoryMemory(
-  state: FridgeQueryStateValue,
-): QueryIntent | "memory_update" {
-  if (state.intent === "inventory" && shouldExtractMemoryCandidates(state)) {
-    return "memory_update";
-  }
+function requiresVerifiedMemoryBeforeIntent(state: FridgeQueryStateValue) {
+  return state.intent === "recipe" ||
+    state.intent === "shopping" ||
+    state.intent === "food_knowledge";
+}
 
-  return routeIntent(state);
+function requiresMemoryMutationReview(state: FridgeQueryStateValue) {
+  return state.memoryCandidates.some((candidate) =>
+    candidate.kind === "inventory_item" &&
+    (candidate.action === "consume" || candidate.action === "remove")
+  );
+}
+
+export function routeIntentWithConcurrentMemory(
+  state: FridgeQueryStateValue,
+): QueryIntent | "await_memory_before_intent" {
+  return requiresVerifiedMemoryBeforeIntent(state)
+    ? "await_memory_before_intent"
+    : routeIntent(state);
+}
+
+export function routeAfterMemoryClassification(
+  state: FridgeQueryStateValue,
+): QueryIntent | "await_memory_before_intent" {
+  return requiresVerifiedMemoryBeforeIntent(state) || requiresMemoryMutationReview(state)
+    ? "await_memory_before_intent"
+    : routeIntent(state);
+}
+
+export function routeMemoryLaneCompletion(
+  state: FridgeQueryStateValue,
+): "memory_ready_for_intent" | "memory_lane_finished" {
+  return requiresVerifiedMemoryBeforeIntent(state) || requiresMemoryMutationReview(state)
+    ? "memory_ready_for_intent"
+    : "memory_lane_finished";
+}
+
+export function routeAfterConcurrentResponse(
+  state: FridgeQueryStateValue,
+): "plan_workspace_actions" | "response_lane_finished" {
+  return requiresVerifiedMemoryBeforeIntent(state)
+    ? "plan_workspace_actions"
+    : "response_lane_finished";
 }
 
 export function routePostResponseMemory(
   state: FridgeQueryStateValue,
 ): "extract_memory_candidates" | "plan_workspace_actions" {
-  return shouldExtractMemoryCandidates(state) ? "extract_memory_candidates" : "plan_workspace_actions";
+  return shouldExtractMemoryCandidates(state) && state.context.memoryExtractionCompleted !== true
+    ? "extract_memory_candidates"
+    : "plan_workspace_actions";
 }
 
 export function routeAfterMemoryReload(
@@ -74,7 +111,11 @@ export function routeInventoryFollowup(
 }
 
 export function routeInventorySplitProposal(state: FridgeQueryStateValue) {
-  return state.intent === "inventory"
+  const appliedAssertions = state.context?.seededInventoryAssertions;
+  const hasAppliedIdentityCorrection = Array.isArray(appliedAssertions) &&
+    appliedAssertions.length > 0;
+
+  return state.intent === "inventory" && !hasAppliedIdentityCorrection
     ? "propose_scoped_inventory_split"
     : "assess_inventory_enrichment";
 }

@@ -6,6 +6,7 @@ import {
   type ExpiryPlan,
   type DietaryPreference,
   type DietaryRestriction,
+  type GoalMemory,
   type GroceryPlan,
   type GroceryPlanItem,
   type PantryCompletionPlan,
@@ -52,6 +53,7 @@ type FridgeQueryChatProps = {
   onDietaryProfileChange(profile: {
     dietaryRestrictions: DietaryRestriction[];
     dietaryPreferences: DietaryPreference[];
+    activeGoals: GoalMemory[];
   }): void;
 };
 
@@ -76,7 +78,20 @@ export type ChatMessage = {
   organizationPlan?: OrganizationPlan;
   visualEvidence?: QueryVisualEvidence[];
   seededItems?: ConversationContextSeededItem[];
+  memoryUpdateMessage?: string;
 };
+
+export function withoutQueryFailureState(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    statusLines: undefined,
+    streaming: false,
+    groceryPlanPending: false,
+    groceryPlanStage: undefined,
+    pantryCompletionPending: false,
+    pantryCompletionStage: undefined,
+  };
+}
 
 type RecipeTournamentState = {
   status: "running" | "finished";
@@ -1272,7 +1287,7 @@ export function FridgeQueryChat({
       return;
     }
 
-    if (initialChat.id === threadId && nextChatScopeKey === loadedChatScopeKey) {
+    if (nextChatScopeKey === loadedChatScopeKey) {
       return;
     }
 
@@ -1286,7 +1301,7 @@ export function FridgeQueryChat({
     setClarificationAnswers({});
     setSplitReview(null);
     setMutationReview(null);
-  }, [expectedChatScopeKey, initialChat, loadedChatScopeKey, threadId]);
+  }, [expectedChatScopeKey, initialChat, loadedChatScopeKey]);
 
   useEffect(() => {
     if (loadedChatScopeKey === expectedChatScopeKey) {
@@ -1383,6 +1398,15 @@ export function FridgeQueryChat({
 
   function releaseChatInput() {
     setStatus((currentStatus) => currentStatus === "submitted" ? "ready" : currentStatus);
+  }
+
+  function handleQueryFailure(messageId: string, caughtError: unknown) {
+    const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
+    console.error("Query graph request failed", message);
+    setError(null);
+    updateAssistantMessage(messageId, withoutQueryFailureState);
+    setStatus("ready");
+    setExecutionStatus("idle");
   }
 
   function handleStreamEvent(messageId: string, event: QueryStreamEvent) {
@@ -1629,6 +1653,22 @@ export function FridgeQueryChat({
       return;
     }
 
+    if (event.type === "memory_update") {
+      const nextDietaryProfile = {
+        dietaryRestrictions: event.dietaryRestrictions,
+        dietaryPreferences: event.dietaryPreferences,
+        activeGoals: event.activeGoals,
+      };
+
+      setDietaryProfile(nextDietaryProfile);
+      onDietaryProfileChange(nextDietaryProfile);
+      updateAssistantMessage(messageId, (message) => ({
+        ...message,
+        memoryUpdateMessage: event.message,
+      }));
+      return;
+    }
+
     if (event.type === "token") {
       updateAssistantMessage(messageId, (message) => ({
         ...message,
@@ -1644,6 +1684,7 @@ export function FridgeQueryChat({
       const nextDietaryProfile = {
         dietaryRestrictions: event.dietaryRestrictions,
         dietaryPreferences: event.dietaryPreferences,
+        activeGoals: event.activeGoals,
       };
 
       setDietaryProfile(nextDietaryProfile);
@@ -1653,7 +1694,10 @@ export function FridgeQueryChat({
       }
       updateAssistantMessage(messageId, (message) => ({
         ...message,
-        text: finalAssistantMessageText(message.text, event),
+        text: [
+          finalAssistantMessageText(message.text, event),
+          message.memoryUpdateMessage,
+        ].filter((value): value is string => typeof value === "string" && value.trim().length > 0).join("\n\n"),
         statusLines: undefined,
         streaming: false,
         recipes: event.groceryPlan || event.groceryPlanError || event.pantryCompletionPlan || event.pantryCompletionError || event.pantryCompletionClarification ? undefined : message.recipeTournament ? undefined : event.recipes,
@@ -1682,7 +1726,7 @@ export function FridgeQueryChat({
       return;
     }
 
-    throw new Error(event.error);
+    handleQueryFailure(messageId, event.error);
   }
 
   async function submitQuery(query: string, options: { recipeContinuation?: boolean } = {}) {
@@ -1738,18 +1782,7 @@ export function FridgeQueryChat({
       setStatus("ready");
       setExecutionStatus("idle");
     } catch (caughtError) {
-      const messageText =
-        caughtError instanceof Error ? caughtError.message : String(caughtError);
-
-      setError(messageText);
-      updateAssistantMessage(assistantMessage.id, (message) => ({
-        ...message,
-        text: `Query graph error: ${messageText}`,
-        statusLines: undefined,
-        streaming: false,
-      }));
-      setStatus("error");
-      setExecutionStatus("idle");
+      handleQueryFailure(assistantMessage.id, caughtError);
     }
   }
 
@@ -1798,16 +1831,7 @@ export function FridgeQueryChat({
       setStatus("ready");
       setExecutionStatus("idle");
     } catch (caughtError) {
-      const messageText = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setError(messageText);
-      updateAssistantMessage(assistantMessage.id, (message) => ({
-        ...message,
-        text: `Query graph error: ${messageText}`,
-        statusLines: undefined,
-        streaming: false,
-      }));
-      setStatus("error");
-      setExecutionStatus("idle");
+      handleQueryFailure(assistantMessage.id, caughtError);
     }
   }
 
@@ -1839,11 +1863,7 @@ export function FridgeQueryChat({
       setStatus("ready");
       setExecutionStatus("idle");
     } catch (caughtError) {
-      const messageText = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setError(messageText);
-      updateAssistantMessage(assistantMessage.id, (message) => ({ ...message, text: `Query graph error: ${messageText}`, statusLines: undefined, streaming: false }));
-      setStatus("error");
-      setExecutionStatus("idle");
+      handleQueryFailure(assistantMessage.id, caughtError);
     }
   }
 
@@ -1876,11 +1896,7 @@ export function FridgeQueryChat({
       setStatus("ready");
       setExecutionStatus("idle");
     } catch (caughtError) {
-      const messageText = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setError(messageText);
-      updateAssistantMessage(assistantMessage.id, (message) => ({ ...message, text: `Query graph error: ${messageText}`, statusLines: undefined, streaming: false }));
-      setStatus("error");
-      setExecutionStatus("idle");
+      handleQueryFailure(assistantMessage.id, caughtError);
     }
   }
 
@@ -1929,11 +1945,7 @@ export function FridgeQueryChat({
       setStatus("ready");
       setExecutionStatus("idle");
     } catch (caughtError) {
-      const messageText = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setError(messageText);
-      updateAssistantMessage(assistantMessage.id, (message) => ({ ...message, text: `Query graph error: ${messageText}`, statusLines: undefined, streaming: false }));
-      setStatus("error");
-      setExecutionStatus("idle");
+      handleQueryFailure(assistantMessage.id, caughtError);
     }
   }
 
@@ -1946,12 +1958,12 @@ export function FridgeQueryChat({
       const response = await fetch("/api/chats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create", userId, fridgeId, imageId }),
+        body: JSON.stringify({ action: "clear", userId, fridgeId, imageId }),
       });
       const payload = await response.json() as { chat?: PersistedChat; error?: string };
 
       if (!response.ok || !payload.chat) {
-        throw new Error(payload.error ?? "Creating a new chat did not return a chat thread");
+        throw new Error(payload.error ?? "Clearing chat did not return a new chat thread");
       }
 
       setMessages(messagesFromChat(payload.chat));
@@ -1967,7 +1979,7 @@ export function FridgeQueryChat({
       onClearSeededItems();
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : String(caughtError);
-      setError(`Creating a new chat failed: ${message}`);
+      setError(`Clearing chat failed: ${message}`);
     }
   }
 

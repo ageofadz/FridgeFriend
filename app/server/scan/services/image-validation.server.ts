@@ -19,6 +19,7 @@ import {
 export type ImageValidationDependencies = {
   promptBundle: Pick<PromptBundle, "imageValidation">;
   validationModel?: FridgeFriendChatModel;
+  loadImageDataUrls?: (imageIds: string[]) => string[];
 };
 
 function invalidImageValidation(reason: string) {
@@ -69,7 +70,7 @@ export async function validateImageState(
   let imageDataUrls: string[];
 
   try {
-    imageDataUrls = loadImageDataUrls(state.imageIds);
+    imageDataUrls = (deps.loadImageDataUrls ?? loadImageDataUrls)(state.imageIds);
     assertImagesAreLocallyLoadable(imageDataUrls);
   } catch (error) {
     return invalidImageValidation(

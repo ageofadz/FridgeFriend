@@ -38,12 +38,16 @@ function state(query: string): FridgeQueryStateValue {
 }
 
 describe("shouldExtractMemoryCandidates", () => {
-  it("extracts only when intent routing identifies an explicit durable update", () => {
-    expect(shouldExtractMemoryCandidates(state("What can I make for dinner tonight?"))).toBe(false);
+  it("extracts once for every query", () => {
+    expect(shouldExtractMemoryCandidates(state("What can I make for dinner tonight?"))).toBe(true);
     expect(shouldExtractMemoryCandidates({
       ...state("I have Jasmine rice in the pantry. What can I cook?"),
-      context: { intentRouting: { memoryUpdateRequested: true } },
+      context: { memoryExtractionCompleted: false },
     })).toBe(true);
+    expect(shouldExtractMemoryCandidates({
+      ...state("What can I make for dinner tonight?"),
+      context: { memoryExtractionCompleted: true },
+    })).toBe(false);
   });
 
   it("uses structured model output for explicit dietary restrictions", async () => {
@@ -118,6 +122,29 @@ describe("shouldExtractMemoryCandidates", () => {
         explicit: true,
       },
     ]);
+  });
+
+  it("hydrates an explicit goal description from the user's complete message", async () => {
+    const node = createExtractMemoryCandidatesNode(deps({
+      candidates: [{
+        kind: "goal",
+        scope: "user",
+        action: "upsert",
+        goalType: "weight_loss",
+        targetValue: null,
+        targetUnit: null,
+        priority: 3,
+        explicit: true,
+      }],
+    }));
+
+    const result = await node(state("I want to lose weight"));
+
+    expect(result.memoryCandidates).toEqual([expect.objectContaining({
+      kind: "goal",
+      goalType: "weight_loss",
+      description: "I want to lose weight",
+    })]);
   });
 
   it("uses structured model output for explicit dietary identities", async () => {

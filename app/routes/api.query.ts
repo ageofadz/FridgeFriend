@@ -11,7 +11,7 @@ import {
 import { QueryResumeSchema } from "../server/query/schemas/query";
 import { jsonError } from "../server/http.server";
 import { ConversationContextSchema, type ConversationContext } from "../workspace/contracts";
-import { getChat, recentChatMessagesForQuery, resumeChatExecution, startChatTurn, updateChatAssistantMessage } from "../server/chat/repository.server";
+import { completeChatAssistantMessage, getChat, recentChatMessagesForQuery, resumeChatExecution, startChatTurn, updateChatAssistantMessage } from "../server/chat/repository.server";
 import type { QueryStreamEvent } from "../workspace/query-events";
 
 type QueryRequestBody = {
@@ -196,7 +196,16 @@ function queryStreamPersistence(input: {
   return {
     onFinal: (event: Extract<QueryStreamEvent, { type: "final" }>) => update(persistedAssistantPayload(event), "idle"),
     onInterrupted: (event: QueryStreamEvent) => update(interruptedAssistantPayload(event), "interrupted"),
-    onError: (error: string) => update({ text: `Query graph error: ${error}` }, "idle"),
+    onError: (error: string) => {
+      console.error("Query graph stream failed", error);
+      completeChatAssistantMessage({
+        userId,
+        fridgeId: input.fridgeId,
+        imageId: input.imageId,
+        threadId: input.threadId,
+        assistantMessageId: input.assistantMessageId,
+      });
+    },
   };
 }
 

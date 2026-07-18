@@ -20,9 +20,7 @@ const INTENT_EMBEDDING_MODEL = "gemini-embedding-001";
 const INTENT_EMBEDDING_DIMENSIONS = 768;
 const INTENT_EMBEDDING_ACCEPTANCE_THRESHOLD = 0.62;
 const INTENT_EMBEDDING_ACCEPTANCE_MARGIN = 0.035;
-const INTENT_EXAMPLE_CORPUS_VERSION = "2026-07-18-delete-mutations";
-const LOCAL_INTENT_ACCEPTANCE_SCORE = 0.34;
-const LOCAL_INTENT_ACCEPTANCE_MARGIN = 0.08;
+const INTENT_EXAMPLE_CORPUS_VERSION = "2026-07-18-semantic-routing";
 
 type ShoppingMode = IntentResponse["shoppingMode"];
 
@@ -32,7 +30,6 @@ type IntentEmbeddingExample = {
   recipeContinuation?: boolean;
   shoppingMode?: ShoppingMode;
   enrichment?: EnrichmentRequirement;
-  memoryUpdateRequested?: boolean;
 };
 
 export type IntentEmbeddingRecord = IntentEmbeddingExample & {
@@ -66,7 +63,6 @@ type IntentExampleMetadata = Metadata & {
   exampleIndex: number;
   recipeContinuation: boolean;
   shoppingMode: ShoppingMode;
-  memoryUpdateRequested: boolean;
 };
 
 type IntentExampleCollectionHandle = {
@@ -107,8 +103,8 @@ export const INTENT_EMBEDDING_EXAMPLES: IntentEmbeddingExample[] = [
   { intent: "inventory", text: "Do I have any chicken left?" },
   { intent: "inventory", text: "List the visible items in this fridge." },
   { intent: "inventory", text: "How much milk do I have?" },
-  { intent: "inventory", text: "Delete the carrots from my inventory.", memoryUpdateRequested: true },
-  { intent: "inventory", text: "I ate the carrots.", memoryUpdateRequested: true },
+  { intent: "inventory", text: "Delete the carrots from my inventory." },
+  { intent: "inventory", text: "I ate the carrots." },
   { intent: "inventory", text: "Is there cheese in here?" },
   { intent: "inventory", text: "What produce is available right now?" },
 
@@ -139,7 +135,7 @@ export const INTENT_EMBEDDING_EXAMPLES: IntentEmbeddingExample[] = [
   { intent: "recipe", text: "Give me a quick breakfast recipe." },
   { intent: "recipe", text: "Find vegetarian meals I can make tonight." },
   { intent: "recipe", text: "Show me more options from those recipes.", recipeContinuation: true },
-  { intent: "recipe", text: "I have jasmine rice in the pantry; what can I cook?", memoryUpdateRequested: true },
+  { intent: "recipe", text: "I have jasmine rice in the pantry; what can I cook?" },
   { intent: "recipe", text: "Plan a high-protein lunch using what I have." },
   { intent: "recipe", text: "What dessert can I make with eggs and milk?" },
   { intent: "recipe", text: "Recommend a soup recipe for this week." },
@@ -189,16 +185,16 @@ export const INTENT_EMBEDDING_EXAMPLES: IntentEmbeddingExample[] = [
   { intent: "placement_correction", text: "Update the shelf position for the chicken." },
   { intent: "placement_correction", text: "This visible item belongs in the bottom bin." },
 
-  { intent: "general_chat", text: "I like bright acidic flavors.", memoryUpdateRequested: true },
-  { intent: "general_chat", text: "I am vegetarian.", memoryUpdateRequested: true },
-  { intent: "general_chat", text: "My household avoids peanuts.", memoryUpdateRequested: true },
-  { intent: "general_chat", text: "Remember that I prefer spicy food.", memoryUpdateRequested: true },
+  { intent: "general_chat", text: "I like bright acidic flavors." },
+  { intent: "general_chat", text: "I am vegetarian." },
+  { intent: "general_chat", text: "My household avoids peanuts." },
+  { intent: "general_chat", text: "Remember that I prefer spicy food." },
   { intent: "general_chat", text: "Thanks for the help." },
-  { intent: "general_chat", text: "That sounds good." },
-  { intent: "general_chat", text: "I am cooking for two people.", memoryUpdateRequested: true },
-  { intent: "general_chat", text: "My goal is reducing food waste.", memoryUpdateRequested: true },
+  { intent: "general_chat", text: "I have a long-term health goal." },
+  { intent: "general_chat", text: "I am cooking for two people." },
+  { intent: "general_chat", text: "My goal is reducing food waste." },
   { intent: "general_chat", text: "No, I meant the other shelf." },
-  { intent: "general_chat", text: "Can you remember my breakfast preference?", memoryUpdateRequested: true },
+  { intent: "general_chat", text: "Can you remember my breakfast preference?" },
 
   { intent: "clarification", text: "I do not know what to ask." },
   { intent: "clarification", text: "What about it?" },
@@ -226,7 +222,7 @@ function createIntentEmbeddings() {
   });
 
   const requestForText = (text: string, taskType: TaskType): IntentEmbedContentRequest => ({
-    content: { role: "user", parts: [{ text: text.replace(/\n/g, " ") }] },
+    content: { role: "user", parts: [{ text: text.replaceAll("\n", " ") }] },
     taskType,
     outputDimensionality: INTENT_EMBEDDING_DIMENSIONS,
   });
@@ -299,7 +295,6 @@ function metadataForIntentExample(example: IntentEmbeddingExample, index: number
     exampleIndex: index,
     recipeContinuation: example.recipeContinuation ?? false,
     shoppingMode: example.shoppingMode ?? "direct",
-    memoryUpdateRequested: example.memoryUpdateRequested ?? false,
   };
 }
 
@@ -352,7 +347,6 @@ function intentExampleFromMetadata(document: string, metadata: IntentExampleMeta
     text: document,
     recipeContinuation: metadata.recipeContinuation,
     shoppingMode: metadata.shoppingMode,
-    memoryUpdateRequested: metadata.memoryUpdateRequested,
   };
 }
 
@@ -453,65 +447,6 @@ function intentResponseFromCandidate(candidate: IntentEmbeddingRouteCandidate): 
     recipeContinuation: candidate.example.recipeContinuation ?? false,
     shoppingMode: candidate.example.shoppingMode ?? "direct",
     enrichment: candidate.example.enrichment ?? emptyEnrichment,
-    memoryUpdateRequested: candidate.example.memoryUpdateRequested ?? false,
-  };
-}
-
-function normalizedWords(text: string) {
-  return text
-    .toLowerCase()
-    .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter((word) => word.length > 1);
-}
-
-function localIntentCandidates(query: string) {
-  const queryWords = new Set(normalizedWords(query));
-  const bestByIntent = new Map<QueryIntent, IntentEmbeddingRouteCandidate>();
-
-  for (const example of INTENT_EMBEDDING_EXAMPLES) {
-    const exampleWords = new Set(normalizedWords(example.text));
-    let overlap = 0;
-
-    for (const word of queryWords) {
-      if (exampleWords.has(word)) overlap += 1;
-    }
-
-    if (overlap === 0) continue;
-
-    const score = overlap / Math.sqrt(queryWords.size * exampleWords.size);
-    const current = bestByIntent.get(example.intent);
-
-    if (!current || score > current.score) {
-      bestByIntent.set(example.intent, {
-        intent: example.intent,
-        score,
-        margin: 0,
-        example,
-      });
-    }
-  }
-
-  const ranked = [...bestByIntent.values()].sort((left, right) => right.score - left.score);
-  return ranked.map((candidate, index) => ({
-    ...candidate,
-    margin: candidate.score - (ranked[index + 1]?.score ?? 0),
-  })).slice(0, 3);
-}
-
-function selectLocalIntentRoute(query: string) {
-  const candidates = localIntentCandidates(query);
-  const match = candidates[0] &&
-      candidates[0].score >= LOCAL_INTENT_ACCEPTANCE_SCORE &&
-      candidates[0].margin >= LOCAL_INTENT_ACCEPTANCE_MARGIN
-    ? candidates[0]
-    : null;
-
-  return {
-    accepted: match ? intentResponseFromCandidate(match) : null,
-    candidates,
   };
 }
 
@@ -520,12 +455,6 @@ export async function routeIntentCandidatesByEmbedding(
   dependencies: IntentEmbeddingDependencies = {},
 ): Promise<IntentEmbeddingRoutingResult> {
   try {
-    const localResult = selectLocalIntentRoute(input.query);
-
-    if (localResult.accepted) {
-      return localResult;
-    }
-
     const embeddings = dependencies.embedQuery && dependencies.embedDocuments
       ? {
         embedQuery: dependencies.embedQuery,

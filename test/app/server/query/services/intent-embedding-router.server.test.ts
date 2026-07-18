@@ -168,11 +168,10 @@ describe("intent embedding router", () => {
     expect(result).toMatchObject({
       intent: "shopping",
       shoppingMode: "grocery_planner",
-      memoryUpdateRequested: false,
     });
   });
 
-  it("routes explicit scanned inventory consumption as a memory update", async () => {
+  it("routes explicit scanned inventory consumption semantically", async () => {
     const upserts: Array<{
       ids: string[];
       documents: string[];
@@ -214,29 +213,6 @@ describe("intent embedding router", () => {
 
     expect(result).toMatchObject({
       intent: "inventory",
-      memoryUpdateRequested: true,
-    });
-  });
-
-  it("routes clear intent requests locally without embedding or Chroma", async () => {
-    const result = await routeIntentCandidatesByEmbedding(
-      { query: "Make a grocery list for tacos." },
-      {
-        embedDocuments: async () => {
-          throw new Error("intent examples should not be embedded for a clear local route");
-        },
-        embedQuery: async () => {
-          throw new Error("query should not be embedded for a clear local route");
-        },
-        getCollection: async () => {
-          throw new Error("Chroma should not be loaded for a clear local route");
-        },
-      },
-    );
-
-    expect(result.accepted).toMatchObject({
-      intent: "shopping",
-      shoppingMode: "grocery_planner",
     });
   });
 
@@ -253,24 +229,22 @@ describe("intent embedding router", () => {
             document: "Make a grocery list for tacos.",
             metadata: {
               documentType: "intent_example",
-              corpusVersion: "2026-07-18-delete-mutations",
+              corpusVersion: "2026-07-18-semantic-routing",
               intent: "shopping",
               exampleIndex: 43,
               recipeContinuation: false,
               shoppingMode: "grocery_planner",
-              memoryUpdateRequested: false,
             },
             distance: 0,
           }, {
             document: "Suggest three dinner ideas with chicken.",
             metadata: {
               documentType: "intent_example",
-              corpusVersion: "2026-07-18-delete-mutations",
+              corpusVersion: "2026-07-18-semantic-routing",
               intent: "recipe",
               exampleIndex: 30,
               recipeContinuation: false,
               shoppingMode: "direct",
-              memoryUpdateRequested: false,
             },
             distance: 1,
           }]],

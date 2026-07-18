@@ -12,12 +12,7 @@ import {
 import type { FridgeQueryStateValue } from "../state";
 
 export function shouldExtractMemoryCandidates(state: FridgeQueryStateValue) {
-  const intentRouting = state.context.intentRouting;
-
-  return typeof intentRouting === "object" &&
-    intentRouting !== null &&
-    "memoryUpdateRequested" in intentRouting &&
-    intentRouting.memoryUpdateRequested === true;
+  return state.context.memoryExtractionCompleted !== true;
 }
 
 export function createExtractMemoryCandidatesNode(deps: QueryGraphDependencies) {
@@ -60,13 +55,24 @@ export function createExtractMemoryCandidatesNode(deps: QueryGraphDependencies) 
         memoryCandidates: [],
         context: {
           ...state.context,
+          memoryExtractionCompleted: true,
           memoryExtractionError: `Memory extraction returned invalid output: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
         },
       };
     }
 
+    const memoryCandidates = parsed.data.candidates.map((candidate) =>
+      candidate.kind === "goal" && candidate.description.trim().length === 0
+        ? { ...candidate, description: query }
+        : candidate,
+    );
+
     return {
-      memoryCandidates: parsed.data.candidates,
+      memoryCandidates,
+      context: {
+        ...state.context,
+        memoryExtractionCompleted: true,
+      },
     };
   };
 }

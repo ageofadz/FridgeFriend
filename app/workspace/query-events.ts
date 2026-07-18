@@ -190,6 +190,21 @@ export const DietaryPreferenceSchema = z.object({
 });
 export type DietaryPreference = z.infer<typeof DietaryPreferenceSchema>;
 
+export const GoalMemorySchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  goalType: z.enum(["high_protein", "weight_loss", "budget", "quick_meals", "reduce_waste", "other"]),
+  description: z.string(),
+  targetValue: z.number().nullable(),
+  targetUnit: z.string().nullable(),
+  priority: z.number().int().min(1).max(5),
+  active: z.boolean(),
+  source: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type GoalMemory = z.infer<typeof GoalMemorySchema>;
+
 export const QueryStreamEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("status"),
@@ -279,6 +294,15 @@ export const QueryStreamEventSchema = z.discriminatedUnion("type", [
     inventory: z.unknown(),
   }),
   z.object({
+    type: z.literal("memory_update"),
+    status: z.enum(["verified", "failed"]),
+    message: z.string(),
+    changedKinds: z.array(z.enum(["inventory_item", "dietary_restriction", "preference", "goal", "misc"])),
+    dietaryRestrictions: z.array(DietaryRestrictionSchema),
+    dietaryPreferences: z.array(DietaryPreferenceSchema),
+    activeGoals: z.array(GoalMemorySchema),
+  }),
+  z.object({
     type: z.literal("final"),
     answer: z.string(),
     // Unknown intents degrade to null instead of failing the whole event.
@@ -294,6 +318,7 @@ export const QueryStreamEventSchema = z.discriminatedUnion("type", [
     visualEvidence: z.array(QueryVisualEvidenceSchema),
     dietaryRestrictions: z.array(DietaryRestrictionSchema),
     dietaryPreferences: z.array(DietaryPreferenceSchema),
+    activeGoals: z.array(GoalMemorySchema),
     workspaceActions: z.array(WorkspaceActionSchema).optional(),
     agentEvents: z.array(AgentActivityEventSchema).optional(),
     retrievalAudit: RecipeRetrievalAuditSchema.optional(),

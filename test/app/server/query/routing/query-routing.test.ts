@@ -110,6 +110,19 @@ describe("scoped inventory split routing", () => {
     expect(routeInventorySplitProposal(state({ intent: "recipe" }))).toBe("assess_inventory_enrichment");
     expect(routeInventorySplitProposal(state({ intent: "expiry" }))).toBe("assess_inventory_enrichment");
   });
+
+  it("never proposes replacing an item after its identity correction has been applied", () => {
+    expect(routeInventorySplitProposal(state({
+      intent: "inventory",
+      context: {
+        seededInventoryAssertions: [{
+          cropId: "image-1:item-1:0",
+          itemId: "item-1",
+          label: "Lychee",
+        }],
+      },
+    }))).toBe("assess_inventory_enrichment");
+  });
 });
 
 describe("kitchen organization routing", () => {

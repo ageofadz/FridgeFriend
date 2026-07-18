@@ -4,6 +4,7 @@ import type { FridgeFriendChatModel } from "../../ai/chat-model.server";
 import type { Recipe, RecipeCandidate } from "../../recipes/types";
 import type { HouseholdInventoryOperationResult } from "../../memory/repository.server";
 import type { PromptBundle } from "../../prompts/registry.server";
+import type { checkpointer as defaultCheckpointer } from "../../checkpointer.server";
 import type {
   MemoryContext,
   MemoryValidationResult,
@@ -69,7 +70,6 @@ export const IntentResponseSchema = z.object({
   recipeContinuation: z.boolean().optional().default(false),
   shoppingMode: ShoppingModeSchema.optional().default("direct"),
   enrichment: EnrichmentRequirementSchema.optional().default({ itemNames: [], fields: [] }),
-  memoryUpdateRequested: z.boolean().optional().default(false),
 });
 export type IntentResponse = z.infer<typeof IntentResponseSchema>;
 
@@ -83,7 +83,6 @@ export const IntentRoutingChoiceSchema = z.object({
     recipeContinuation: z.boolean().optional(),
     shoppingMode: ShoppingModeSchema.optional(),
     enrichment: EnrichmentRequirementSchema.optional(),
-    memoryUpdateRequested: z.boolean().optional(),
   }),
 });
 export type IntentRoutingChoice = z.infer<typeof IntentRoutingChoiceSchema>;
@@ -122,12 +121,8 @@ export const IntentResponseProviderSchema = {
       required: ["itemNames", "fields"],
       description: "Only inventory facts needed to answer the request. Leave both arrays empty when the coarse inventory is sufficient.",
     },
-    memoryUpdateRequested: {
-      type: "boolean",
-      description: "True only when the user explicitly states an inventory item change, including adding household inventory or deleting, removing, consuming, or finishing a scanned item; a dietary restriction or identity; a food preference; a personal goal; or a durable household fact that should be saved.",
-    },
   },
-  required: ["intent", "enrichment", "memoryUpdateRequested"],
+  required: ["intent", "enrichment"],
 } as const;
 
 const RecipeSearchFacetKindSchema = z.enum([
@@ -429,6 +424,7 @@ export const WorkspaceActionPlanProviderSchema = {
 } as const;
 
 export type QueryGraphDependencies = {
+  checkpointer?: typeof defaultCheckpointer | null;
   promptBundle?: Pick<
     PromptBundle,
     "queryMemoryExtraction" | "queryRecipeSearch" | "queryResponse"

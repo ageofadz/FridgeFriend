@@ -98,8 +98,12 @@ function writeIsVisible(input: {
   }
 
   if (candidate.kind === "goal") {
+    if (candidate.action === "deactivate") {
+      return !memoryContext.activeGoals.some((memory) => memory.goalType === candidate.goalType);
+    }
+
     const visible = memoryContext.activeGoals.some((memory) => memory.id === targetId);
-    return candidate.action === "upsert" ? visible : !visible;
+    return visible;
   }
 
   const visible = memoryContext.semanticMemories.some((memory) => memory.id === targetId && memory.active);
@@ -128,7 +132,7 @@ function verifyMemoryWrites(input: {
 
   if (persisted.length === 0) {
     return {
-      status: "not_applicable",
+      status: "failed",
       persistedCount: 0,
       verifiedCount: 0,
       missing: [],
@@ -418,6 +422,10 @@ export function createReloadMemoryContextNode(deps: QueryGraphDependencies) {
         )
         : [],
     });
+    const {
+      memoryWriteVerificationError: _memoryWriteVerificationError,
+      ...context
+    } = state.context;
 
     return {
       memoryWriteResults: state.memoryWriteResults ?? [],
@@ -427,11 +435,15 @@ export function createReloadMemoryContextNode(deps: QueryGraphDependencies) {
       activeGoals: memoryContext.activeGoals,
       semanticMemories: memoryContext.semanticMemories,
       context: {
-        ...state.context,
-        memoryWriteResults: state.memoryWriteResults ?? [],
-        memoryWriteVerification,
-        ...(memoryWriteVerification.status === "failed"
-          ? { memoryWriteVerificationError: memoryWriteVerification.message }
+        ...context,
+        ...(state.memoryWriteResults.length > 0
+          ? {
+            memoryWriteResults: state.memoryWriteResults,
+            memoryWriteVerification,
+            ...(memoryWriteVerification.status === "failed"
+              ? { memoryWriteVerificationError: memoryWriteVerification.message }
+              : {}),
+          }
           : {}),
       },
     };

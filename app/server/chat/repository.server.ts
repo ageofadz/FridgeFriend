@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import Database from "better-sqlite3";
 
 import {
   INITIAL_CHAT_ASSISTANT_TEXT,
@@ -126,25 +127,56 @@ function loadChat(id: string, scope: ChatScope) {
   return chatFromRow(row, messages);
 }
 
-export function createChat(scope: ChatScope): PersistedChat {
-  validateScope(scope);
+function insertChat(sqlite: Database.Database, scope: ChatScope) {
   const id = randomUUID();
   const assistantMessageId = randomUUID();
   const now = new Date().toISOString();
 
-  withDatabase((_, sqlite) => {
+  sqlite.prepare(`
+    insert into fridge_chat_threads (id, user_id, fridge_id, image_id, execution_status, created_at, updated_at)
+    values (?, ?, ?, ?, 'idle', ?, ?)
+  `).run(id, scope.userId, scope.fridgeId, scope.imageId, now, now);
+  sqlite.prepare(`
+    insert into fridge_chat_messages (id, thread_id, role, payload_json, status, created_at, updated_at)
+    values (?, ?, 'assistant', ?, 'idle', ?, ?)
+  `).run(assistantMessageId, id, JSON.stringify({ text: INITIAL_CHAT_ASSISTANT_TEXT }), now, now);
+
+  return id;
+}
+
+export function createChat(scope: ChatScope): PersistedChat {
+  validateScope(scope);
+  const id = withDatabase((_, sqlite) => {
+    const transaction = sqlite.transaction(() => insertChat(sqlite, scope));
+
+    return transaction();
+  });
+
+  return loadChat(id, scope);
+}
+
+export function clearChats(scope: ChatScope): PersistedChat {
+  validateScope(scope);
+  const scopeWhere = scopeWhereClause(scope);
+  const id = withDatabase((_, sqlite) => {
     const transaction = sqlite.transaction(() => {
       sqlite.prepare(`
-        insert into fridge_chat_threads (id, user_id, fridge_id, image_id, execution_status, created_at, updated_at)
-        values (?, ?, ?, ?, 'idle', ?, ?)
-      `).run(id, scope.userId, scope.fridgeId, scope.imageId, now, now);
+        delete from fridge_chat_messages
+        where thread_id in (
+          select id
+          from fridge_chat_threads
+          where ${scopeWhere.sql}
+        )
+      `).run(...scopeWhere.params);
       sqlite.prepare(`
-        insert into fridge_chat_messages (id, thread_id, role, payload_json, status, created_at, updated_at)
-        values (?, ?, 'assistant', ?, 'idle', ?, ?)
-      `).run(assistantMessageId, id, JSON.stringify({ text: INITIAL_CHAT_ASSISTANT_TEXT }), now, now);
+        delete from fridge_chat_threads
+        where ${scopeWhere.sql}
+      `).run(...scopeWhere.params);
+
+      return insertChat(sqlite, scope);
     });
 
-    transaction();
+    return transaction();
   });
 
   return loadChat(id, scope);
@@ -264,6 +296,41 @@ export function updateChatAssistantMessage(input: ChatScope & {
         set execution_status = ?, updated_at = ?
         where id = ? and ${scopeWhere.sql}
       `).run(input.status, now, input.threadId, ...scopeWhere.params);
+
+      if (thread.changes !== 1) {
+        throw new Error(`Chat thread ${input.threadId} was not found for this fridge`);
+      }
+    });
+
+    transaction();
+  });
+}
+
+export function completeChatAssistantMessage(input: ChatScope & {
+  threadId: string;
+  assistantMessageId: string;
+}) {
+  validateScope(input);
+
+  withDatabase((_, sqlite) => {
+    const transaction = sqlite.transaction(() => {
+      const now = new Date().toISOString();
+      const result = sqlite.prepare(`
+        update fridge_chat_messages
+        set status = 'idle', updated_at = ?
+        where id = ? and thread_id = ? and role = 'assistant'
+      `).run(now, input.assistantMessageId, input.threadId);
+
+      if (result.changes !== 1) {
+        throw new Error(`Assistant chat message ${input.assistantMessageId} was not found in thread ${input.threadId}`);
+      }
+
+      const scopeWhere = scopeWhereClause(input);
+      const thread = sqlite.prepare(`
+        update fridge_chat_threads
+        set execution_status = 'idle', updated_at = ?
+        where id = ? and ${scopeWhere.sql}
+      `).run(now, input.threadId, ...scopeWhere.params);
 
       if (thread.changes !== 1) {
         throw new Error(`Chat thread ${input.threadId} was not found for this fridge`);

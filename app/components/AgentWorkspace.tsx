@@ -85,7 +85,7 @@ type DrawState = {
   current: { x: number; y: number };
 };
 type SeedBoundingBoxResponse = {
-  status: "known_item" | "created_item";
+  status: "created_item";
   cropId: string;
   item: InventoryItem;
   inventory: Inventory;
@@ -512,6 +512,7 @@ export function AgentWorkspace({
   const [userProfile, setUserProfile] = useState(() => ({
     dietaryRestrictions,
     dietaryPreferences,
+    activeGoals,
   }));
   const [hoveredItemId, setHoveredItemId] = useState<string | null>(null);
   const [hoveredRecipeItemIds, setHoveredRecipeItemIds] = useState<string[] | null>(null);
@@ -600,8 +601,8 @@ export function AgentWorkspace({
   }, [currentImage?.id, updatePhotoMetrics]);
 
   useEffect(() => {
-    setUserProfile({ dietaryRestrictions, dietaryPreferences });
-  }, [dietaryPreferences, dietaryRestrictions]);
+    setUserProfile({ dietaryRestrictions, dietaryPreferences, activeGoals });
+  }, [activeGoals, dietaryPreferences, dietaryRestrictions]);
 
   const selectItem = useCallback((itemId: string) => {
     setSeededBoundingBoxes([]);
@@ -697,7 +698,7 @@ export function AgentWorkspace({
     }
 
     if (
-      (result.status !== "known_item" && result.status !== "created_item") ||
+      result.status !== "created_item" ||
       typeof result.cropId !== "string" ||
       typeof result.draftText !== "string" ||
       !result.item ||
@@ -1208,11 +1209,11 @@ export function AgentWorkspace({
         ) : location === "user_profile" ? (
           <div className="user-profile-workspace">
             <UserProfileArtifact
-              activeGoals={activeGoals}
+              activeGoals={userProfile.activeGoals}
               dietaryPreferences={userProfile.dietaryPreferences}
               dietaryRestrictions={userProfile.dietaryRestrictions}
               onReset={() => {
-                setUserProfile({ dietaryRestrictions: [], dietaryPreferences: [] });
+                setUserProfile({ dietaryRestrictions: [], dietaryPreferences: [], activeGoals: [] });
                 onResetUserProfile();
               }}
               semanticMemories={semanticMemories}

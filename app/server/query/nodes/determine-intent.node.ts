@@ -2,44 +2,12 @@ import type { QueryGraphDependencies } from "../schemas/query";
 import {
   IntentResponseSchema,
   IntentRoutingChoiceSchema,
-  type EnrichmentRequirement,
   type IntentEmbeddingRoutingResult,
   type IntentRoutingChoice,
   type QueryIntent,
 } from "../schemas/query";
-import { conversationContextFromState } from "../services/conversation-context.server";
 import { routeIntentCandidatesByEmbedding } from "../services/intent-embedding-router.server";
 import type { FridgeQueryStateValue } from "../state";
-
-const SELECTED_DETAIL_ENRICHMENT_FIELDS = [
-  "identity",
-  "quantity",
-  "fill_level",
-  "opened",
-  "expiration_date",
-] as const;
-
-function selectedItemDetailEnrichment(state: FridgeQueryStateValue, query: string): EnrichmentRequirement | null {
-  const normalizedQuery = query.toLowerCase().replace(/\s+/g, " ").trim();
-
-  if (
-    normalizedQuery !== "get more detail about this." &&
-    normalizedQuery !== "get more detail about this"
-  ) {
-    return null;
-  }
-
-  const seededItems = conversationContextFromState(state).seededItems;
-
-  if (seededItems.length === 0) {
-    return null;
-  }
-
-  return {
-    itemNames: [...new Set(seededItems.map((item) => item.itemId))],
-    fields: [...SELECTED_DETAIL_ENRICHMENT_FIELDS],
-  };
-}
 
 function parseEmbeddingRoutingResult(result: Awaited<ReturnType<NonNullable<QueryGraphDependencies["intentEmbeddingRouter"]>>>): {
   data: IntentEmbeddingRoutingResult | null;
@@ -105,7 +73,6 @@ function intentRoutingFromChoice(choice: IntentRoutingChoice) {
     recipeContinuation: choice.example.recipeContinuation ?? false,
     shoppingMode: choice.example.shoppingMode ?? "direct",
     enrichment: choice.example.enrichment ?? { itemNames: [], fields: [] },
-    memoryUpdateRequested: choice.example.memoryUpdateRequested ?? false,
   };
 }
 
@@ -128,24 +95,6 @@ export function createDetermineIntentNode(deps: QueryGraphDependencies) {
             recipeContinuation: true,
             shoppingMode: "direct",
             enrichment: { itemNames: [], fields: [] },
-            memoryUpdateRequested: false,
-          },
-        },
-      };
-    }
-
-    const selectedDetailEnrichment = selectedItemDetailEnrichment(state, query);
-
-    if (selectedDetailEnrichment) {
-      return {
-        intent: "inventory" as const,
-        context: {
-          ...state.context,
-          intentRouting: {
-            recipeContinuation: false,
-            shoppingMode: "direct",
-            enrichment: selectedDetailEnrichment,
-            memoryUpdateRequested: false,
           },
         },
       };
@@ -173,7 +122,6 @@ export function createDetermineIntentNode(deps: QueryGraphDependencies) {
             recipeContinuation: embeddingResult.data.accepted.recipeContinuation,
             shoppingMode: embeddingResult.data.accepted.shoppingMode,
             enrichment: embeddingResult.data.accepted.enrichment,
-            memoryUpdateRequested: embeddingResult.data.accepted.memoryUpdateRequested,
           },
         },
       };

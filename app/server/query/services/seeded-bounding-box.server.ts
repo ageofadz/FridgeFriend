@@ -23,8 +23,6 @@ import { loadPromptBundle } from "../../prompts/registry.server";
 import { inventorySeedCropId } from "../../../workspace/contracts";
 import { cropImageBoundingBoxDataUrl } from "./focused-visual-context.server";
 
-const BOX_MATCH_THRESHOLD = 0.3;
-
 const SeededBoxIdentificationSchema = z.object({
   label: z.string().min(1),
   name: z.string().min(1),
@@ -83,7 +81,7 @@ const SeededBoxIdentificationSchema = z.object({
 type SeededBoxIdentification = z.infer<typeof SeededBoxIdentificationSchema>;
 
 type SeededBoundingBoxResult = {
-  status: "known_item" | "created_item";
+  status: "created_item";
   cropId: string;
   item: InventoryItem;
   inventory: Inventory;
@@ -115,74 +113,6 @@ function baseInventoryImageId(imageId: string) {
   );
 }
 
-function area(box: NormalizedBoundingBox) {
-  return box.width * box.height;
-}
-
-function intersectionArea(
-  left: NormalizedBoundingBox,
-  right: NormalizedBoundingBox,
-) {
-  const x = Math.max(
-    0,
-    Math.min(left.x + left.width, right.x + right.width) -
-    Math.max(left.x, right.x),
-  );
-  const y = Math.max(
-    0,
-    Math.min(left.y + left.height, right.y + right.height) -
-    Math.max(left.y, right.y),
-  );
-
-  return x * y;
-}
-
-function boxMatchScore(
-  left: NormalizedBoundingBox,
-  right: NormalizedBoundingBox,
-) {
-  const intersection = intersectionArea(left, right);
-  const union = area(left) + area(right) - intersection;
-  const selectedContainment = intersection / Math.max(area(left), Number.EPSILON);
-  const itemContainment = intersection / Math.max(area(right), Number.EPSILON);
-  const iou = union > 0 ? intersection / union : 0;
-
-  return Math.max(iou, selectedContainment, itemContainment);
-}
-
-function findKnownItem(input: {
-  inventory: Inventory;
-  imageId: string;
-  boundingBox: NormalizedBoundingBox;
-}) {
-  return input.inventory.items
-    .flatMap((item) =>
-      item.loc.observations
-        .map((observation, observationIndex) => ({
-          item,
-          observation,
-          observationIndex,
-          score: observation.imageId === input.imageId
-            ? boxMatchScore(input.boundingBox, observation.boundingBox)
-            : 0,
-        }))
-    )
-    .filter((candidate) => candidate.score >= BOX_MATCH_THRESHOLD)
-    .sort((left, right) => right.score - left.score)[0] ?? null;
-}
-
-function sameBox(
-  left: NormalizedBoundingBox,
-  right: NormalizedBoundingBox,
-) {
-  const epsilon = 0.00001;
-
-  return Math.abs(left.x - right.x) < epsilon &&
-    Math.abs(left.y - right.y) < epsilon &&
-    Math.abs(left.width - right.width) < epsilon &&
-    Math.abs(left.height - right.height) < epsilon;
-}
-
 function zoneForBox(
   inventory: Inventory,
   imageId: string,
@@ -202,12 +132,36 @@ function zoneForBox(
       return {
         zone,
         score: centerContained
-          ? 1 + boxMatchScore(boundingBox, zone.boundingBox)
-          : boxMatchScore(boundingBox, zone.boundingBox),
+          ? 1 + boxOverlapScore(boundingBox, zone.boundingBox)
+          : boxOverlapScore(boundingBox, zone.boundingBox),
       };
     })
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.zone ?? null;
+}
+
+function boxOverlapScore(
+  left: NormalizedBoundingBox,
+  right: NormalizedBoundingBox,
+) {
+  const x = Math.max(
+    0,
+    Math.min(left.x + left.width, right.x + right.width) -
+    Math.max(left.x, right.x),
+  );
+  const y = Math.max(
+    0,
+    Math.min(left.y + left.height, right.y + right.height) -
+    Math.max(left.y, right.y),
+  );
+  const intersection = x * y;
+  const leftArea = left.width * left.height;
+  const rightArea = right.width * right.height;
+  const union = leftArea + rightArea - intersection;
+  const leftContainment = intersection / Math.max(leftArea, Number.EPSILON);
+  const rightContainment = intersection / Math.max(rightArea, Number.EPSILON);
+
+  return Math.max(union > 0 ? intersection / union : 0, leftContainment, rightContainment);
 }
 
 function depthBackRatioForBoxInZone(
@@ -255,63 +209,6 @@ async function identifySeededBoxWithVision(input: {
   );
 
   return SeededBoxIdentificationSchema.parse(response);
-}
-
-function createKnownItemInventory(input: {
-  inventory: Inventory;
-  itemId: string;
-  imageId: string;
-  boundingBox: NormalizedBoundingBox;
-}) {
-  let observationIndex = -1;
-  const zone = zoneForBox(input.inventory, input.imageId, input.boundingBox);
-  const inventory: Inventory = {
-    ...input.inventory,
-    items: input.inventory.items.map((item) => {
-      if (item.id !== input.itemId) {
-        return item;
-      }
-
-      const existingIndex = item.loc.observations.findIndex((observation) =>
-        observation.imageId === input.imageId &&
-        sameBox(observation.boundingBox, input.boundingBox)
-      );
-
-      if (existingIndex >= 0) {
-        observationIndex = existingIndex;
-        return item;
-      }
-
-      observationIndex = item.loc.observations.length;
-      return {
-        ...item,
-        loc: {
-          ...item.loc,
-          observations: [
-            ...item.loc.observations,
-            {
-              imageId: input.imageId,
-              depthBackRatio: zone
-                ? depthBackRatioForBoxInZone(input.boundingBox, zone)
-                : null,
-              boundingBox: input.boundingBox,
-            },
-          ],
-        },
-      };
-    }),
-  };
-
-  if (observationIndex < 0) {
-    throw new Error(
-      `Cannot seed bounding box because matched item ${input.itemId} was not found while updating inventory`,
-    );
-  }
-
-  return {
-    inventory,
-    observationIndex,
-  };
 }
 
 function createSeededInventoryItem(input: {
@@ -388,46 +285,6 @@ export async function seedInventoryBoundingBox(input: {
     throw new Error(
       `Cannot seed bounding box because inventory for image ${inventoryImageId} was not found`,
     );
-  }
-
-  const knownItem = findKnownItem({
-    inventory,
-    imageId: input.imageId,
-    boundingBox,
-  });
-
-  if (knownItem) {
-    const updated = createKnownItemInventory({
-      inventory,
-      itemId: knownItem.item.id,
-      imageId: input.imageId,
-      boundingBox,
-    });
-    const savedInventory = saveFridgeInventory({
-      imageId: inventoryImageId,
-      inventory: updated.inventory,
-    });
-    const item = savedInventory.items.find((candidate) =>
-      candidate.id === knownItem.item.id
-    );
-
-    if (!item) {
-      throw new Error(
-        `Cannot seed bounding box because known item ${knownItem.item.id} was not found after saving inventory`,
-      );
-    }
-
-    return {
-      status: "known_item",
-      cropId: inventorySeedCropId({
-        imageId: input.imageId,
-        itemId: item.id,
-        observationIndex: updated.observationIndex,
-      }),
-      item,
-      inventory: savedInventory,
-      draftText: '',
-    };
   }
 
   const cropDataUrl = await cropImageBoundingBoxDataUrl({

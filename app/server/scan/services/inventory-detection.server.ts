@@ -28,6 +28,7 @@ import { createVisionModel } from "./vision-model.server";
 export type InventoryDetectionDependencies = {
   promptBundle: Pick<PromptBundle, "inventoryDetection">;
   detectionModel?: FridgeFriendChatModel;
+  loadImageDataUrls?: (imageIds: string[]) => string[];
 };
 
 function invalidInventoryDetection(reason: string) {
@@ -218,7 +219,7 @@ export async function detectInventory(
   let imageDataUrls: string[];
 
   try {
-    imageDataUrls = loadImageDataUrls(state.imageIds);
+    imageDataUrls = (deps.loadImageDataUrls ?? loadImageDataUrls)(state.imageIds);
     assertImagesAreLocallyLoadable(imageDataUrls);
   } catch (error) {
     return invalidInventoryDetection(

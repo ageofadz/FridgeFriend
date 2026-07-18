@@ -15,6 +15,7 @@ import {
   streamQueryForFridgeImage,
 } from "../../../../app/server/query/graph.server";
 import { shouldExtractMemoryCandidates } from "../../../../app/server/query/nodes/extract-memory-candidates.node";
+import { createRespondNode } from "../../../../app/server/query/nodes/respond.node";
 import type { FridgeQueryStateValue } from "../../../../app/server/query/state";
 import {
   QUERY_VISIBLE_RESPONSE_TAG,
@@ -215,11 +216,11 @@ function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
           candidate === intent
         ? result.shoppingMode
         : undefined,
-      memoryUpdateRequested: typeof result === "object" &&
+      enrichment: typeof result === "object" &&
           result !== null &&
           candidate === intent
-        ? "memoryUpdateRequested" in result && typeof result.memoryUpdateRequested === "boolean"
-          ? result.memoryUpdateRequested
+        ? "enrichment" in result && typeof result.enrichment === "object"
+          ? result.enrichment as IntentRoutingChoice["example"]["enrichment"]
           : undefined
         : undefined,
     },
@@ -744,6 +745,7 @@ describe("query graph streaming", () => {
       visualEvidence: [],
       dietaryRestrictions: [expect.objectContaining({ subject: "peanuts" })],
       dietaryPreferences: [expect.objectContaining({ subject: "vegetarian" })],
+      activeGoals: [],
       workspaceActions: [],
       agentEvents: [],
     });
@@ -1048,9 +1050,39 @@ describe("query graph streaming", () => {
 
     expect(result.intent).toBe("inventory");
     expect(result.answer).toBe("You have 12 eggs.");
-    expect(intentModelCalls).toBe(1);
+    expect(intentModelCalls).toBe(0);
     expect(responseModelCalls).toBe(1);
     expect(householdToolCalls).toBe(1);
+  });
+
+  it("returns inventory mutation wording from the response model", async () => {
+    const node = createRespondNode({
+      promptBundle: testPromptBundle(),
+      responseModel: {
+        invoke: async () => new AIMessage("I have removed the carrots from your library."),
+      } as unknown as FridgeFriendChatModel,
+    });
+
+    await expect(node({
+      userId: "default-user",
+      fridgeId: "fridge-1",
+      imageId: null,
+      query: "Remove the carrots.",
+      threadId: "test-thread",
+      intent: "general_chat",
+      memoryValidations: [],
+      memoryWriteResults: [],
+      externalInventory: [],
+      dietaryRestrictions: [],
+      dietaryPreferences: [],
+      activeGoals: [],
+      semanticMemories: [],
+      visualEvidence: [],
+      context: {},
+      answer: null,
+    } as unknown as FridgeQueryStateValue)).resolves.toMatchObject({
+      answer: "I have removed the carrots from your library.",
+    });
   });
 
   it("answers the newest query when a chat thread already has an answer", async () => {
@@ -1498,7 +1530,13 @@ describe("query graph streaming", () => {
           },
         },
         fakeDeps({
-          intent: "clarification",
+          intentResult: {
+            intent: "inventory",
+            enrichment: {
+              itemNames: ["item-1"],
+              fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
+            },
+          },
           overrides: {
             loadInventoryForImage: getFridgeInventoryForImage,
             enrichmentModel: createStructuredModel({
@@ -1605,6 +1643,13 @@ describe("query graph streaming", () => {
           },
         },
         fakeDeps({
+          intentResult: {
+            intent: "inventory",
+            enrichment: {
+              itemNames: ["item-1"],
+              fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
+            },
+          },
           overrides: {
             loadInventoryForImage: getFridgeInventoryForImage,
             enrichmentModel: createStructuredModel({
@@ -1686,6 +1731,13 @@ describe("query graph streaming", () => {
           },
         },
         fakeDeps({
+          intentResult: {
+            intent: "inventory",
+            enrichment: {
+              itemNames: ["item-1"],
+              fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
+            },
+          },
           overrides: {
             loadInventoryForImage: getFridgeInventoryForImage,
             enrichmentModel: createStructuredModel({
@@ -2184,20 +2236,14 @@ describe("query graph streaming", () => {
     expect(events.at(-1)).toMatchObject({
       type: "final",
       answer: "I hear you like bright, acidic flavors.",
+      memoryWriteVerificationError: "No durable memory was saved: Synthetic write skip",
     });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "memory_update",
+      status: "failed",
+      message: "Profile update failed: No durable memory was saved: Synthetic write skip",
+    }));
     expect(responsePayload).not.toBeNull();
-    const capturedPayload = responsePayload as { context: Record<string, unknown> };
-    expect(capturedPayload.context.memoryWriteResults).toMatchObject([
-      {
-        status: "skipped",
-        message: "Synthetic write skip",
-      },
-    ]);
-    expect(capturedPayload.context.memoryWriteVerification).toMatchObject({
-      status: "not_applicable",
-      persistedCount: 0,
-      message: "No durable memory was saved: Synthetic write skip",
-    });
   });
 
   it("surfaces verification errors when persisted writes are not visible after reload", async () => {
@@ -2263,6 +2309,74 @@ describe("query graph streaming", () => {
     });
   });
 
+  it("does not carry memory write verification errors into the next turn", async () => {
+    setLangSmithEnv();
+
+    const threadId = `test-${randomUUID()}`;
+    const first = await runQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "I like bright, acidic flavors.",
+        threadId,
+      },
+      fakeDeps({
+        intent: "general_chat",
+        memoryCandidates: [
+          {
+            kind: "preference",
+            scope: "user",
+            action: "upsert",
+            subject: "bright, acidic flavors",
+            sentiment: "like",
+            strength: 4,
+            notes: null,
+            explicit: true,
+          },
+        ],
+        overrides: {
+          persistMemoryValidations: async ({ validations }) =>
+            validations.map((validation) => ({
+              result: {
+                kind: validation.candidate.kind,
+                action: validation.candidate.action,
+                status: "persisted",
+                targetId: "missing-preference",
+                message: "Synthetic persisted write",
+              },
+              semanticMemory: null,
+            })),
+        },
+      }),
+    );
+
+    let capturedPayload: { context?: Record<string, unknown> } | null = null;
+    const second = await runQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "What is in my fridge?",
+        threadId,
+      },
+      fakeDeps({
+        intent: "inventory",
+        responseModel: {
+          invoke: async (messages: Array<{ content: unknown }>) => {
+            capturedPayload = JSON.parse(String(messages[1]?.content));
+            return new AIMessage("You have chicken.");
+          },
+        } as unknown as FridgeFriendChatModel,
+      }),
+    );
+
+    expect(first.memoryWriteVerificationError).toBe("Persisted preference upsert target missing-preference was not visible after reload.");
+    expect(second.answer).toBe("You have chicken.");
+    const responsePayload = capturedPayload as { context?: Record<string, unknown> } | null;
+    expect(responsePayload?.context?.memoryWriteVerificationError).toBeUndefined();
+    expect(responsePayload?.context?.memoryWriteVerification).toBeUndefined();
+    expect(responsePayload?.context?.memoryWriteResults ?? []).toEqual([]);
+  });
+
   it("saves simple explicit preferences to the user profile store", async () => {
     await withTestDatabase(async () => {
       const result = await runQueryForFridgeImage(
@@ -2319,7 +2433,7 @@ describe("query graph streaming", () => {
           threadId: `test-${randomUUID()}`,
         },
         fakeDeps({
-          intent: "general_chat",
+          intentResult: { intent: "general_chat", memoryUpdateRequested: true },
           overrides: {
             memoryExtractionModel: {
               withStructuredOutput: () => ({
@@ -2360,6 +2474,138 @@ describe("query graph streaming", () => {
         },
       ]);
     });
+  });
+
+  it("persists an explicit goal without delaying an ordinary response", async () => {
+    await withTestDatabase(async () => {
+      let capturedGoals: unknown[] = [];
+      const result = await runQueryForFridgeImage(
+        {
+          fridgeId: "default-fridge",
+          imageId: "image-1",
+          query: "I want to lose weight",
+          threadId: `test-${randomUUID()}`,
+        },
+        fakeDeps({
+          intent: "general_chat",
+          memoryCandidates: [{
+            kind: "goal",
+            scope: "user",
+            action: "upsert",
+            goalType: "weight_loss",
+            description: "Lose weight",
+            targetValue: null,
+            targetUnit: null,
+            priority: 3,
+            explicit: true,
+          }],
+          responseModel: {
+            invoke: async (messages: Array<{ content: unknown }>) => {
+              const payload = JSON.parse(String(messages[1]?.content)) as {
+                context?: { activeGoals?: unknown[] };
+              };
+              capturedGoals = payload.context?.activeGoals ?? [];
+              return new AIMessage("I can help you choose meals that support that goal.");
+            },
+          } as unknown as FridgeFriendChatModel,
+          overrides: {
+            persistMemoryValidations: undefined,
+            loadMemoryContext: undefined,
+          },
+        }),
+      );
+      const memoryContext = listStructuredMemoryContext({
+        userId: "default-user",
+        fridgeId: "default-fridge",
+      });
+
+      expect(result.answer).toBe("I can help you choose meals that support that goal.");
+      expect(capturedGoals).toEqual([]);
+      expect(memoryContext.activeGoals).toMatchObject([{ goalType: "weight_loss", description: "Lose weight" }]);
+    });
+  });
+
+  it("starts an ordinary response while its memory write is still pending", async () => {
+    setLangSmithEnv();
+
+    let responseStarted = false;
+    let persisted = false;
+    let releasePersist: (() => void) | undefined;
+    const persistReady = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+
+    const events: QueryStreamEvent[] = [];
+
+    for await (const event of streamQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "I like bright, acidic flavors.",
+        threadId: `test-${randomUUID()}`,
+      },
+      fakeDeps({
+        intent: "general_chat",
+        memoryCandidates: [{
+          kind: "preference",
+          scope: "user",
+          action: "upsert",
+          subject: "bright, acidic flavors",
+          sentiment: "like",
+          strength: 4,
+          notes: null,
+          explicit: true,
+        }],
+        responseModel: {
+          invoke: async () => {
+            responseStarted = true;
+            releasePersist?.();
+            return new AIMessage("Final streamed answer");
+          },
+        } as unknown as FridgeFriendChatModel,
+        overrides: {
+          loadMemoryContext: () => persisted
+            ? {
+              ...emptyMemoryContext(),
+              dietaryPreferences: [{
+                id: "preference-1",
+                userId: "default-user",
+                subject: "bright, acidic flavors",
+                sentiment: "like",
+                strength: 4,
+                notes: null,
+                source: "user_explicit",
+                createdAt: "2026-07-18T00:00:00.000Z",
+                updatedAt: "2026-07-18T00:00:00.000Z",
+              }],
+            }
+            : emptyMemoryContext(),
+          persistMemoryValidations: async ({ validations }) => {
+            await persistReady;
+            persisted = true;
+            return validations.map((validation) => ({
+              result: {
+                kind: validation.candidate.kind,
+                action: validation.candidate.action,
+                status: "persisted" as const,
+                targetId: "preference-1",
+                message: "Saved preference",
+              },
+              semanticMemory: null,
+            }));
+          },
+        },
+      }),
+    )) {
+      events.push(event);
+    }
+
+    expect(responseStarted).toBe(true);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "memory_update",
+      status: "verified",
+      message: "Profile update saved.",
+    }));
   });
 
   it("persists explicit dietary identities before continuing recipe handling", async () => {
@@ -2496,7 +2742,6 @@ describe("query graph streaming", () => {
             action: "remove",
             name: "carrots",
             storageLocation: "fridge",
-            quantity: null,
             notes: null,
             explicit: true,
           },
@@ -2512,6 +2757,60 @@ describe("query graph streaming", () => {
     expect(events).toContainEqual({
       type: "inventory_mutation_review",
       operation: "remove",
+      itemName: "carrots",
+      storageLocation: "fridge",
+    });
+    expect(events.some((event) => event.type === "final")).toBe(false);
+  });
+
+  it("requests inventory mutation review before answering when intent routing is not inventory", async () => {
+    setLangSmithEnv();
+
+    const events: QueryStreamEvent[] = [];
+
+    for await (const event of streamQueryForFridgeImage(
+      {
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "The carrots are gone.",
+        threadId: `test-${randomUUID()}`,
+      },
+      fakeDeps({
+        intentResult: {
+          intent: "general_chat",
+          recipeContinuation: false,
+          shoppingMode: "direct",
+          enrichment: { itemNames: [], fields: [] },
+          memoryUpdateRequested: true,
+        },
+        memoryCandidates: [
+          {
+            kind: "inventory_item",
+            scope: "fridge",
+            action: "consume",
+            name: "carrots",
+            storageLocation: "fridge",
+            quantity: null,
+            notes: null,
+            explicit: true,
+          },
+        ],
+        responseModel: {
+          invoke: async () => {
+            throw new Error("Inventory mutation review must happen before the response model runs");
+          },
+        } as unknown as FridgeFriendChatModel,
+        overrides: {
+          persistMemoryValidations: undefined,
+        },
+      }),
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual({
+      type: "inventory_mutation_review",
+      operation: "consume",
       itemName: "carrots",
       storageLocation: "fridge",
     });
@@ -2737,7 +3036,7 @@ describe("query graph streaming", () => {
     });
   }, 10000);
 
-  it("skips memory extraction for plain recipe questions", async () => {
+  it("extracts durable memory before plain recipe questions", async () => {
     setLangSmithEnv();
 
     let extractionCalls = 0;
@@ -2788,7 +3087,7 @@ describe("query graph streaming", () => {
     );
 
     expect(result.intent).toBe("recipe");
-    expect(extractionCalls).toBe(0);
+    expect(extractionCalls).toBe(1);
     expect(recipeSearchCalls).toBe(0);
     expect(searchQueries).toEqual(["recipe using chicken"]);
   }, 10000);
@@ -2838,20 +3137,20 @@ describe("query graph streaming", () => {
     expect(result.answer).toBe("Retrieval did not produce a recipe safe to recommend from the supplied data.");
   }, 10000);
 
-  it("runs memory extraction only when intent routing identifies a durable update", () => {
+  it("runs memory extraction until the current turn completes it", () => {
     expect(shouldExtractMemoryCandidates({
       userId: "default-user",
       fridgeId: "fridge-1",
       imageId: "image-1",
       query: "I have Jasmine rice in the pantry. What can I cook?",
-      context: { intentRouting: { memoryUpdateRequested: true } },
+      context: { memoryExtractionCompleted: false },
     } as unknown as FridgeQueryStateValue)).toBe(true);
     expect(shouldExtractMemoryCandidates({
       userId: "default-user",
       fridgeId: "fridge-1",
       imageId: "image-1",
       query: "What recipes can I make from the items in my fridge?",
-      context: { intentRouting: { memoryUpdateRequested: false } },
+      context: { memoryExtractionCompleted: true },
     } as unknown as FridgeQueryStateValue)).toBe(false);
   });
 

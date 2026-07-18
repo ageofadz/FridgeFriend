@@ -85,12 +85,12 @@ function intentChoicesForResult(result: unknown): IntentRoutingChoice[] {
           candidate === intent
         ? result.shoppingMode
         : undefined,
-      memoryUpdateRequested: typeof result === "object" &&
+      enrichment: typeof result === "object" &&
           result !== null &&
-          "memoryUpdateRequested" in result &&
-          typeof result.memoryUpdateRequested === "boolean" &&
           candidate === intent
-        ? result.memoryUpdateRequested
+        ? "enrichment" in result && typeof result.enrichment === "object"
+          ? result.enrichment as IntentRoutingChoice["example"]["enrichment"]
+          : undefined
         : undefined,
     },
   }));
@@ -183,10 +183,16 @@ describe("determine intent node", () => {
     });
   });
 
-  it("routes selected item detail requests without model classification", async () => {
+  it("uses selected-item enrichment from semantic routing", async () => {
     let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
-      { intent: "recipe" },
+      {
+        intent: "inventory",
+        enrichment: {
+          itemNames: ["milk"],
+          fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
+        },
+      },
       () => {
         modelCalls += 1;
       },
@@ -220,7 +226,6 @@ describe("determine intent node", () => {
             itemNames: ["milk"],
             fields: ["identity", "quantity", "fill_level", "opened", "expiration_date"],
           },
-          memoryUpdateRequested: false,
         },
       },
     });
@@ -376,16 +381,15 @@ describe("determine intent node", () => {
     });
   });
 
-  it("marks explicit durable facts for memory extraction", async () => {
+  it("leaves durable-memory extraction independent from intent routing", async () => {
     const node = createDetermineIntentNode(deps({
       intent: "recipe",
-      memoryUpdateRequested: true,
       enrichment: { itemNames: [], fields: [] },
     }));
 
     await expect(node(state({ query: "I have jasmine rice in the pantry. What can I cook?" }))).resolves.toMatchObject({
       intent: "recipe",
-      context: { intentRouting: { memoryUpdateRequested: true } },
+      context: { intentRouting: { enrichment: { itemNames: [], fields: [] } } },
     });
   });
 

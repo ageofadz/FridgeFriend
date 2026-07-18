@@ -22,11 +22,22 @@ import {
 import { ScanState } from "./state";
 import type { ScanStateValue } from "./state";
 import type { ScanStreamEvent } from "../../workspace/scan-events";
+import type { PromptBundle } from "../prompts/registry.server";
+import type { FridgeFriendChatModel } from "../ai/chat-model.server";
 
 export type ScanGraphInput = {
   fridgeId: string;
   imageId: string;
   storageLocation: StorageImageLocation;
+};
+
+export type ScanGraphDependencies = {
+  promptBundle?: Pick<PromptBundle, "imageValidation" | "inventoryDetection" | "zoneMap">;
+  validationModel?: FridgeFriendChatModel;
+  detectionModel?: FridgeFriendChatModel;
+  zoneMapModel?: FridgeFriendChatModel;
+  loadImageDataUrls?: (imageIds: string[]) => string[];
+  checkpointer?: typeof checkpointer | null;
 };
 
 const scanGraphModelRetryPolicy: RetryPolicy = {
@@ -84,18 +95,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * stage and reason. Database persistence happens in the caller — the graph
  * only produces the reconciled inventory and checkpoints its state.
  */
-export async function createScanGraph() {
-  const promptBundle = await loadPromptBundle();
+export async function createScanGraph(deps: ScanGraphDependencies = {}) {
+  const promptBundle = deps.promptBundle ?? await loadPromptBundle();
+  const graphCheckpointer = deps.checkpointer === undefined
+    ? checkpointer
+    : deps.checkpointer;
 
   return new StateGraph(ScanState)
-    .addNode("validate_images", createValidateImagesNode({ promptBundle }), {
+    .addNode("validate_images", createValidateImagesNode({ promptBundle, validationModel: deps.validationModel, loadImageDataUrls: deps.loadImageDataUrls }), {
       retryPolicy: scanGraphModelRetryPolicy,
     })
     .addNode("start_scan_analysis", async () => ({ scanStatus: "processing" }))
-    .addNode("detect_inventory", createDetectInventoryNode({ promptBundle }), {
+    .addNode("detect_inventory", createDetectInventoryNode({ promptBundle, detectionModel: deps.detectionModel, loadImageDataUrls: deps.loadImageDataUrls }), {
       retryPolicy: scanGraphModelRetryPolicy,
     })
-    .addNode("map_zones", createMapZonesNode({ promptBundle }), {
+    .addNode("map_zones", createMapZonesNode({ promptBundle, zoneMapModel: deps.zoneMapModel, loadImageDataUrls: deps.loadImageDataUrls }), {
       retryPolicy: scanGraphModelRetryPolicy,
     })
     .addNode("ground_item_placements", createGroundItemPlacementsNode())
@@ -124,9 +138,7 @@ export async function createScanGraph() {
     )
     .addEdge("finalize_scan", END)
     .addEdge("scan_failed", END)
-    .compile({
-      checkpointer,
-    });
+    .compile(graphCheckpointer ? { checkpointer: graphCheckpointer } : undefined);
 }
 
 /**

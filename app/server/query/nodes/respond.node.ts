@@ -135,9 +135,15 @@ function createHumanMessageContent(input: {
       inventoryEnrichment: input.state.context.inventoryEnrichment,
       inventorySplitProposal: input.state.context.inventorySplitProposal,
       seededInventoryAssertions: input.state.context.seededInventoryAssertions,
-      memoryWriteResults: input.state.context.memoryWriteResults,
-      memoryWriteVerification: input.state.context.memoryWriteVerification,
-      memoryWriteVerificationError: input.state.context.memoryWriteVerificationError,
+      ...(Array.isArray(input.state.context.memoryWriteResults) && input.state.context.memoryWriteResults.length > 0
+        ? { memoryWriteResults: input.state.context.memoryWriteResults }
+        : {}),
+      ...(typeof input.state.context.memoryWriteVerification === "object" && input.state.context.memoryWriteVerification !== null
+        ? { memoryWriteVerification: input.state.context.memoryWriteVerification }
+        : {}),
+      ...(typeof input.state.context.memoryWriteVerificationError === "string"
+        ? { memoryWriteVerificationError: input.state.context.memoryWriteVerificationError }
+        : {}),
       scannedInventoryMutations: input.state.context.scannedInventoryMutations,
       externalInventory: input.state.externalInventory,
       dietaryRestrictions: input.state.dietaryRestrictions,

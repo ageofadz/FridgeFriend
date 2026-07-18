@@ -28,6 +28,7 @@ import { createVisionModel } from "./vision-model.server";
 export type ZoneMapDependencies = {
   promptBundle: Pick<PromptBundle, "zoneMap">;
   zoneMapModel?: FridgeFriendChatModel;
+  loadImageDataUrls?: (imageIds: string[]) => string[];
 };
 
 function invalidZoneMap(reason: string) {
@@ -171,7 +172,7 @@ export async function mapZones(
   let imageDataUrls: string[];
 
   try {
-    imageDataUrls = loadImageDataUrls(state.imageIds);
+    imageDataUrls = (deps.loadImageDataUrls ?? loadImageDataUrls)(state.imageIds);
     assertImagesAreLocallyLoadable(imageDataUrls);
   } catch (error) {
     return invalidZoneMap(error instanceof Error ? error.message : String(error));
