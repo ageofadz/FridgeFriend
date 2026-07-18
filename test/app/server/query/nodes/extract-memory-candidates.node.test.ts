@@ -5,6 +5,7 @@ import type { FridgeFriendChatModel } from "../../../../../app/server/ai/chat-mo
 import { PromptName } from "../../../../../app/server/prompts/registry.server";
 import {
   createExtractMemoryCandidatesNode,
+  filterRecipeGoalCandidates,
   shouldExtractMemoryCandidates,
 } from "../../../../../app/server/query/nodes/extract-memory-candidates.node";
 import type { QueryGraphDependencies } from "../../../../../app/server/query/schemas/query";
@@ -16,7 +17,7 @@ function deps(result: unknown): QueryGraphDependencies {
       queryMemoryExtraction: {
         name: PromptName.QueryMemoryExtraction,
         ref: "bundled:query-memory-extraction",
-        prompt: ChatPromptTemplate.fromMessages([["human", "{{query}}"]], { templateFormat: "mustache" }),
+        prompt: ChatPromptTemplate.fromMessages([["human", "{{memory_context_json}}\n{{query}}"]], { templateFormat: "mustache" }),
       },
     } as unknown as QueryGraphDependencies["promptBundle"],
     memoryExtractionModel: {
@@ -79,6 +80,82 @@ describe("shouldExtractMemoryCandidates", () => {
         explicit: true,
       },
     ]);
+  });
+
+  it("provides current structured memory for ordinary reconciliation candidates", async () => {
+    let renderedPrompt = "";
+    const node = createExtractMemoryCandidatesNode({
+      ...deps({ candidates: [] }),
+      memoryExtractionModel: {
+        withStructuredOutput: () => ({
+          invoke: async (messages: Array<{ content: unknown }>) => {
+            renderedPrompt = messages.map((message) => String(message.content)).join("\n");
+            return { candidates: [] };
+          },
+        }),
+      } as unknown as FridgeFriendChatModel,
+    });
+
+    await node({
+      ...state("I no longer follow my stored food rules."),
+      dietaryRestrictions: [{
+        id: "restriction-1",
+        userId: "default-user",
+        restrictionType: "allergy",
+        subject: "peanuts",
+        severity: "strict_avoid",
+        notes: "confirmed",
+        source: "user_explicit",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+      }],
+      dietaryPreferences: [{
+        id: "preference-1",
+        userId: "default-user",
+        subject: "spicy food",
+        sentiment: "like",
+        strength: 4,
+        notes: null,
+        source: "user_explicit",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+      }],
+      activeGoals: [{
+        id: "goal-1",
+        userId: "default-user",
+        goalType: "quick_meals",
+        description: "Cook faster dinners",
+        targetValue: null,
+        targetUnit: null,
+        priority: 3,
+        active: true,
+        source: "user_explicit",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+      }],
+    });
+
+    expect(renderedPrompt).toContain(JSON.stringify({
+      dietaryRestrictions: [{
+        restrictionType: "allergy",
+        subject: "peanuts",
+        severity: "strict_avoid",
+        notes: "confirmed",
+      }],
+      dietaryPreferences: [{
+        subject: "spicy food",
+        sentiment: "like",
+        strength: 4,
+        notes: null,
+      }],
+      activeGoals: [{
+        goalType: "quick_meals",
+        description: "Cook faster dinners",
+        targetValue: null,
+        targetUnit: null,
+        priority: 3,
+      }],
+    }));
   });
 
   it("uses structured model output for explicit dietary preferences", async () => {
@@ -145,6 +222,26 @@ describe("shouldExtractMemoryCandidates", () => {
       goalType: "weight_loss",
       description: "I want to lose weight",
     })]);
+  });
+
+  it("never retains goals from a recipe request", () => {
+    const result = filterRecipeGoalCandidates({
+      ...state("Show me quick meal ideas"),
+      intent: "recipe",
+      memoryCandidates: [{
+        kind: "goal",
+        scope: "user",
+        action: "upsert",
+        goalType: "quick_meals",
+        description: "Show me quick recipes",
+        targetValue: null,
+        targetUnit: null,
+        priority: 3,
+        explicit: true,
+      }],
+    });
+
+    expect(result.memoryCandidates).toEqual([]);
   });
 
   it("uses structured model output for explicit dietary identities", async () => {

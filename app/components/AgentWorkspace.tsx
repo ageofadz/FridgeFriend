@@ -1381,7 +1381,7 @@ export function AgentWorkspace({
               </div>
               {activities.length > 0 ? (
                 <div className="workspace-activity" aria-live="polite">
-                  {activities.map((event, index) => <p key={`${event.type}-${index}`}>{event.type === "enrichment_started" ? `Inspecting ${event.itemId}` : event.type === "enrichment_completed" ? `Updated ${event.itemId}` : event.type === "enrichment_failed" || event.type === "inventory_assertion_failed" ? event.error : event.type === "inventory_assertion_applied" ? `Labeled ${event.itemId} as ${event.label}` : event.question}</p>)}
+                  {activities.map((event, index) => <p key={`${event.type}-${index}`}>{event.type === "enrichment_started" ? "Inspecting the selected item" : event.type === "enrichment_completed" ? "Updated the selected item" : event.type === "enrichment_failed" ? "Couldn't inspect the selected item." : event.type === "inventory_assertion_failed" ? "Couldn't update the selected item." : event.type === "inventory_assertion_applied" ? `Updated the selected item to ${event.label}` : event.question}</p>)}
                 </div>
               ) : null}
             </div>

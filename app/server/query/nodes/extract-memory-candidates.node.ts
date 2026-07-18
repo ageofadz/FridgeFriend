@@ -15,9 +15,40 @@ export function shouldExtractMemoryCandidates(state: FridgeQueryStateValue) {
   return state.context.memoryExtractionCompleted !== true;
 }
 
+export function filterRecipeGoalCandidates(state: FridgeQueryStateValue) {
+  if (state.intent !== "recipe") {
+    return {};
+  }
+
+  return {
+    memoryCandidates: state.memoryCandidates.filter((candidate) => candidate.kind !== "goal"),
+  };
+}
+
 export function createExtractMemoryCandidatesNode(deps: QueryGraphDependencies) {
   return async function extractMemoryCandidatesNode(state: FridgeQueryStateValue) {
     const query = state.query.trim();
+    const memoryContext = JSON.stringify({
+      dietaryRestrictions: (state.dietaryRestrictions ?? []).map((restriction) => ({
+        restrictionType: restriction.restrictionType,
+        subject: restriction.subject,
+        severity: restriction.severity,
+        notes: restriction.notes,
+      })),
+      dietaryPreferences: (state.dietaryPreferences ?? []).map((preference) => ({
+        subject: preference.subject,
+        sentiment: preference.sentiment,
+        strength: preference.strength,
+        notes: preference.notes,
+      })),
+      activeGoals: (state.activeGoals ?? []).map((goal) => ({
+        goalType: goal.goalType,
+        description: goal.description,
+        targetValue: goal.targetValue,
+        targetUnit: goal.targetUnit,
+        priority: goal.priority,
+      })),
+    });
 
     const model = deps.memoryExtractionModel ?? createQueryModel();
     const structuredModel = model.withStructuredOutput(
@@ -32,7 +63,10 @@ export function createExtractMemoryCandidatesNode(deps: QueryGraphDependencies) 
       throw new Error("Missing query memory extraction prompt in query graph dependencies");
     }
 
-    const messages = await promptMessages(loadedPrompt, { query });
+    const messages = await promptMessages(loadedPrompt, {
+      query,
+      memory_context_json: memoryContext,
+    });
     const result = await structuredModel.invoke(
       messages,
       {

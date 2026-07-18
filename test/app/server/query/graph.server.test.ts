@@ -234,7 +234,7 @@ function testPromptBundle(): NonNullable<QueryGraphDependencies["promptBundle"]>
       ref: "fridgefriend-query-memory-extraction:latest",
       prompt: ChatPromptTemplate.fromMessages([
         ["system", "Extract only durable memory candidates from the user's message."],
-        ["human", "{{query}}"],
+        ["human", "{{memory_context_json}}\n{{query}}"],
       ], { templateFormat: "mustache" }),
     },
     queryRecipeSearch: {
@@ -2174,6 +2174,93 @@ describe("query graph streaming", () => {
     ]);
   });
 
+  it("streams a verified empty restriction profile after ordinary per-record removals", async () => {
+    setLangSmithEnv();
+
+    const dietaryRestrictions = [
+      {
+        id: "restriction-1",
+        userId: "default-user",
+        restrictionType: "allergy" as const,
+        subject: "peanuts",
+        severity: "strict_avoid" as const,
+        notes: null,
+        source: "user_explicit" as const,
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+      },
+      {
+        id: "restriction-2",
+        userId: "default-user",
+        restrictionType: "other" as const,
+        subject: "vegetarian",
+        severity: "strict_avoid" as const,
+        notes: null,
+        source: "user_explicit" as const,
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+      },
+    ];
+    const dietaryPreferences = [{
+      id: "preference-1",
+      userId: "default-user",
+      subject: "spicy food",
+      sentiment: "like" as const,
+      strength: 4,
+      notes: null,
+      source: "user_explicit" as const,
+      createdAt: "2026-07-18T00:00:00.000Z",
+      updatedAt: "2026-07-18T00:00:00.000Z",
+    }];
+    let memoryLoadCount = 0;
+    const events: QueryStreamEvent[] = [];
+
+    for await (const event of streamQueryForFridgeImage(
+      {
+        userId: "default-user",
+        fridgeId: "fridge-1",
+        imageId: "image-1",
+        query: "That entire dietary category no longer applies to me.",
+        threadId: `test-${randomUUID()}`,
+      },
+      fakeDeps({
+        intent: "general_chat",
+        memoryCandidates: dietaryRestrictions.map((restriction) => ({
+          kind: "dietary_restriction" as const,
+          scope: "user" as const,
+          action: "remove" as const,
+          restrictionType: restriction.restrictionType,
+          subject: restriction.subject,
+          severity: restriction.severity,
+          notes: restriction.notes,
+          explicit: true,
+        })),
+        overrides: {
+          loadMemoryContext: () => {
+            memoryLoadCount += 1;
+            return memoryLoadCount === 1
+              ? { ...emptyMemoryContext(), dietaryRestrictions, dietaryPreferences }
+              : { ...emptyMemoryContext(), dietaryPreferences };
+          },
+        },
+      }),
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "memory_update",
+      status: "verified",
+      dietaryRestrictions: [],
+      dietaryPreferences: [expect.objectContaining({ subject: "spicy food" })],
+    }));
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      dietaryRestrictions: [],
+      dietaryPreferences: [expect.objectContaining({ subject: "spicy food" })],
+    });
+  });
+
   it("does not report skipped memory writes as saved", async () => {
     setLangSmithEnv();
 
@@ -2230,20 +2317,22 @@ describe("query graph streaming", () => {
     expect(statuses).toContainEqual({
       type: "status",
       node: "apply_memory_writes",
-      message: "No durable memory was saved: Synthetic write skip",
+      message: "Couldn't save the update.",
     });
     expect(statuses.map((event) => event.message)).not.toContain("Saved durable memory updates.");
     expect(events.at(-1)).toMatchObject({
       type: "final",
       answer: "I hear you like bright, acidic flavors.",
-      memoryWriteVerificationError: "No durable memory was saved: Synthetic write skip",
     });
+    expect(events.at(-1)).not.toHaveProperty("memoryWriteVerificationError");
     expect(events).toContainEqual(expect.objectContaining({
       type: "memory_update",
       status: "failed",
-      message: "Profile update failed: No durable memory was saved: Synthetic write skip",
+      message: "I couldn't save that update. Please try again.",
     }));
     expect(responsePayload).not.toBeNull();
+    expect(JSON.stringify(responsePayload)).not.toContain("Synthetic write skip");
+    expect(events.some((event) => JSON.stringify(event).includes("Synthetic write skip"))).toBe(false);
   });
 
   it("surfaces verification errors when persisted writes are not visible after reload", async () => {
@@ -2291,8 +2380,6 @@ describe("query graph streaming", () => {
     }
 
     const statuses = events.filter((event): event is Extract<QueryStreamEvent, { type: "status" }> => event.type === "status");
-    const final = events.at(-1);
-
     expect(statuses).toContainEqual({
       type: "status",
       node: "apply_memory_writes",
@@ -2301,12 +2388,9 @@ describe("query graph streaming", () => {
     expect(statuses).toContainEqual({
       type: "status",
       node: "reload_memory_context",
-      message: "Durable memory verification failed: Persisted preference upsert target missing-preference was not visible after reload.",
+      message: "Couldn't confirm the profile update.",
     });
-    expect(final).toMatchObject({
-      type: "final",
-      memoryWriteVerificationError: "Persisted preference upsert target missing-preference was not visible after reload.",
-    });
+    expect(events.some((event) => JSON.stringify(event).includes("missing-preference"))).toBe(false);
   });
 
   it("does not carry memory write verification errors into the next turn", async () => {

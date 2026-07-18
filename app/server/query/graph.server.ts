@@ -10,7 +10,10 @@ import { createCalculateSpaceNode } from "./nodes/calculate-space.node";
 import { createDetermineIntentNode } from "./nodes/determine-intent.node";
 import { createApplySeededInventoryAssertionsNode } from "./nodes/apply-seeded-inventory-assertions.node";
 import { createBuildRecipeSearchNode } from "./nodes/build-recipe-search.node";
-import { createExtractMemoryCandidatesNode } from "./nodes/extract-memory-candidates.node";
+import {
+  createExtractMemoryCandidatesNode,
+  filterRecipeGoalCandidates,
+} from "./nodes/extract-memory-candidates.node";
 import { createLoadFridgeContextNode } from "./nodes/load-fridge-context.node";
 import {
   createApplyMemoryWritesNode,
@@ -103,6 +106,8 @@ import { z } from "zod";
 // Caps how many parallel tasks (for example fanned-out evaluate_recipe Sends)
 // run at once so a twenty-candidate tournament cannot burst twenty model calls.
 const QUERY_GRAPH_MAX_CONCURRENCY = 5;
+const GROCERY_PLAN_FAILURE_MESSAGE = "I couldn't finish the grocery plan. Please try again.";
+const PANTRY_COMPLETION_FAILURE_MESSAGE = "I couldn't finish the pantry plan. Please try again.";
 
 const queryGraphModelRetryPolicy: RetryPolicy = {
   maxAttempts: 4,
@@ -185,6 +190,7 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
         retryPolicy: queryGraphModelRetryPolicy,
       },
     )
+    .addNode("filter_recipe_goal_candidates", filterRecipeGoalCandidates)
     .addNode("validate_memory_candidates", validateMemoryCandidatesNode)
     .addNode("apply_memory_writes", createApplyMemoryWritesNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
@@ -271,7 +277,8 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       clarification: "request_clarification",
       await_memory_before_intent: "await_memory_before_intent",
     })
-    .addEdge("extract_memory_candidates", "validate_memory_candidates")
+    .addEdge("continue_after_memory_classification", "filter_recipe_goal_candidates")
+    .addEdge("filter_recipe_goal_candidates", "validate_memory_candidates")
     .addEdge("validate_memory_candidates", "apply_memory_writes")
     .addEdge("apply_memory_writes", "index_semantic_memory")
     .addEdge("index_semantic_memory", "reload_memory_context")
@@ -415,9 +422,9 @@ export async function runQueryForFridgeImage(
     visualEvidence: result.visualEvidence,
     workspaceActions: workspaceActionsFromContext(result.context),
     groceryPlan: groceryPlanFromContext(result.context),
-    groceryPlanError: groceryPlanErrorFromContext(result.context),
+    groceryPlanError: groceryPlanErrorFromContext(result.context) ? GROCERY_PLAN_FAILURE_MESSAGE : null,
     pantryCompletionPlan: pantryCompletionPlanFromContext(result.context),
-    pantryCompletionError: pantryCompletionErrorFromContext(result.context),
+    pantryCompletionError: pantryCompletionErrorFromContext(result.context) ? PANTRY_COMPLETION_FAILURE_MESSAGE : null,
     pantryCompletionClarification: pantryCompletionClarificationFromContext(result.context),
     memoryWriteVerificationError: memoryWriteVerificationErrorFromContext(result.context),
   };
@@ -532,7 +539,7 @@ function memoryUpdateFromReload(input: {
     status,
     message: status === "verified"
       ? "Profile update saved."
-      : `Profile update failed: ${verification.message}`,
+      : "I couldn't save that update. Please try again.",
     changedKinds,
     dietaryRestrictions: Array.isArray(input.update.dietaryRestrictions)
       ? input.update.dietaryRestrictions as DietaryRestrictionMemory[]
@@ -554,19 +561,13 @@ function nodeStatusMessageForUpdate(
   if (node === "apply_memory_writes") {
     const writes = memoryWriteResultsFromUpdate(update);
     const persistedCount = writes.filter((write) => write.status === "persisted").length;
-    const skipped = writes.filter((write) => write.status === "skipped");
 
     if (writes.length === 0) {
       return "No durable memory writes were attempted.";
     }
 
     if (persistedCount === 0) {
-      const reasons = skipped
-        .flatMap((write) => typeof write.message === "string" && write.message.trim().length > 0 ? [write.message] : [])
-        .join("; ");
-      return reasons
-        ? `No durable memory was saved: ${reasons}`
-        : "No durable memory was saved.";
+      return "Couldn't save the update.";
     }
 
     return `Persisted ${persistedCount} durable memory update${persistedCount === 1 ? "" : "s"}; awaiting reload verification.`;
@@ -590,7 +591,7 @@ function nodeStatusMessageForUpdate(
     }
 
     if (verification && verification.status === "failed" && typeof verification.message === "string") {
-      return `Durable memory verification failed: ${verification.message}`;
+      return "Couldn't confirm the profile update.";
     }
 
     if (verification && verification.status === "not_applicable" && typeof verification.message === "string") {
@@ -842,7 +843,6 @@ export async function* streamQueryForFridgeImage(
   let pantryCompletionPlanEmitted = false;
   let pantryCompletionErrorEmitted = false;
   let pantryCompletionClarificationEmitted = false;
-  let finalMemoryWriteVerificationError: string | undefined;
 
   yield {
     type: "status",
@@ -863,7 +863,7 @@ export async function* streamQueryForFridgeImage(
     if (streamResult.type === "gemini_stream_parse_error") {
       yield {
         type: "error",
-        error: streamResult.error,
+        error: "I couldn't complete that request. Please try again.",
       };
       return;
     }
@@ -966,10 +966,6 @@ export async function* streamQueryForFridgeImage(
           finalVisualEvidence = update.visualEvidence;
         }
 
-        if (typeof context.memoryWriteVerificationError === "string") {
-          finalMemoryWriteVerificationError = context.memoryWriteVerificationError;
-        }
-
         if (node === "apply_memory_writes") {
           for (const inventory of scannedInventoryMutationInventories(context)) {
             yield { type: "inventory_updated", inventory };
@@ -1009,10 +1005,10 @@ export async function* streamQueryForFridgeImage(
 
         const groceryPlanError = groceryPlanErrorFromContext(context);
         if (groceryPlanError) {
-          finalGroceryPlanError = groceryPlanError;
+          finalGroceryPlanError = GROCERY_PLAN_FAILURE_MESSAGE;
           if (!groceryPlanErrorEmitted) {
             groceryPlanErrorEmitted = true;
-            yield { type: "grocery_plan_error", error: groceryPlanError };
+            yield { type: "grocery_plan_error", error: GROCERY_PLAN_FAILURE_MESSAGE };
           }
         }
 
@@ -1029,10 +1025,10 @@ export async function* streamQueryForFridgeImage(
 
         const pantryCompletionError = pantryCompletionErrorFromContext(context);
         if (pantryCompletionError) {
-          finalPantryCompletionError = pantryCompletionError;
+          finalPantryCompletionError = PANTRY_COMPLETION_FAILURE_MESSAGE;
           if (!pantryCompletionErrorEmitted) {
             pantryCompletionErrorEmitted = true;
-            yield { type: "pantry_completion_error", error: pantryCompletionError };
+            yield { type: "pantry_completion_error", error: PANTRY_COMPLETION_FAILURE_MESSAGE };
           }
         }
 
@@ -1159,7 +1155,6 @@ export async function* streamQueryForFridgeImage(
         workspaceActions: finalWorkspaceActions,
         agentEvents: [],
         retrievalAudit: finalRecipeRetrievalAudit,
-        memoryWriteVerificationError: finalMemoryWriteVerificationError,
       };
     }
     return;
@@ -1188,7 +1183,6 @@ export async function* streamQueryForFridgeImage(
     workspaceActions: finalWorkspaceActions,
     agentEvents: [],
     retrievalAudit: finalRecipeRetrievalAudit,
-    memoryWriteVerificationError: finalMemoryWriteVerificationError,
   };
 }
 
@@ -1214,9 +1208,9 @@ export async function* continueQueryForFridgeThread(
       recipes: recipeCardsFromContext(context),
       expiryPlan: expiryPlanFromContext(context) ?? undefined,
       groceryPlan: groceryPlanFromContext(context) ?? undefined,
-      groceryPlanError: groceryPlanErrorFromContext(context) ?? undefined,
+      groceryPlanError: groceryPlanErrorFromContext(context) ? GROCERY_PLAN_FAILURE_MESSAGE : undefined,
       pantryCompletionPlan: pantryCompletionPlanFromContext(context) ?? undefined,
-      pantryCompletionError: pantryCompletionErrorFromContext(context) ?? undefined,
+      pantryCompletionError: pantryCompletionErrorFromContext(context) ? PANTRY_COMPLETION_FAILURE_MESSAGE : undefined,
       pantryCompletionClarification: pantryCompletionClarificationFromContext(context) ?? undefined,
       organizationPlan: organizationPlanFromContext(context) ?? undefined,
       visualEvidence: isQueryVisualEvidence(values.visualEvidence) ? values.visualEvidence : [],
@@ -1226,7 +1220,6 @@ export async function* continueQueryForFridgeThread(
       workspaceActions: workspaceActionsFromContext(context),
       agentEvents: [],
       retrievalAudit: RecipeRetrievalAuditSchema.safeParse(values.recipeRetrievalAudit).data,
-      memoryWriteVerificationError: memoryWriteVerificationErrorFromContext(context) ?? undefined,
     };
     return;
   }

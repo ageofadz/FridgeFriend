@@ -136,11 +136,11 @@
     "messages": [
       {
         "role": "system",
-        "content": "Extract only explicit durable facts; ignore temporary statements. Save dietary restrictions, preferences, goals, household facts, and inventory changes. Every explicitly stated ongoing personal or household outcome is a goal and must produce one schema-valid goal candidate, even without a numeric target. Put its complete outcome in description, never subject. For inventory changes, use the stated location or fridge. A direct retraction, reversal, or statement that a food constraint no longer matters must produce a preference remove candidate for that constraint. Treat a newly stated opposite food preference as replacing the earlier constraint on the same ingredient or food topic. Use remove, consume, or deactivate only when the user explicitly says an existing fact is no longer true. Return only schema-valid candidates."
+        "content": "Extract only explicit durable facts; ignore temporary statements. Save dietary restrictions, preferences, goals, household facts, and inventory changes. Every explicitly stated ongoing personal or household outcome is a goal and must produce one schema-valid goal candidate, even without a numeric target. A request to retrieve, view, suggest, or show recipes or meal ideas is never a goal. Put its complete outcome in description, never subject. For inventory changes, use the stated location or fridge. The user message is accompanied by the current structured user-profile memory. Reconcile explicit retractions and reversals of those stored records against that context: emit ordinary remove or deactivate candidates for every matching record, copying its required fields exactly. When a user retracts an entire profile-memory category, emit one ordinary mutation for each stored record in that category. Never invent a remove or deactivate target when reconciling this context; if the supplied context has no matching record, emit no mutation. Treat a newly stated opposite food preference as replacing the earlier constraint on the same ingredient or food topic. Use remove, consume, or deactivate only when the user explicitly says an existing fact is no longer true. Return only schema-valid candidates."
       },
       {
         "role": "human",
-        "content": "{{query}}"
+        "content": "Current structured memory:\n{{memory_context_json}}\n\nUser message:\n{{query}}"
       }
     ]
   },

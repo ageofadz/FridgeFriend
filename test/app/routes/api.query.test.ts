@@ -54,7 +54,7 @@ describe("query API stream response", () => {
     ]);
   });
 
-  it("streams specific error events and persists the failure state when invocation fails", async () => {
+  it("keeps invocation errors out of the client stream while persisting the failure state", async () => {
     async function* streamFactory(): AsyncGenerator<QueryStreamEvent> {
       yield { type: "status", message: "Starting query graph." } as const;
       throw new Error("Food.com recipe Chroma search failed: connection refused");
@@ -71,8 +71,7 @@ describe("query API stream response", () => {
       { type: "status", message: "Starting query graph." },
       {
         type: "error",
-        error:
-          "Query graph invocation failed: Food.com recipe Chroma search failed: connection refused",
+        error: "I couldn't complete that request. Please try again.",
       },
     ]);
     expect(persistedError).toBe("Food.com recipe Chroma search failed: connection refused");
@@ -91,7 +90,7 @@ describe("query API stream response", () => {
     });
 
     expect(await responseLines(response)).toEqual([
-      { type: "error", error: "Query graph completed without an answer" },
+      { type: "error", error: "I couldn't complete that request. Please try again." },
     ]);
     expect(persistedError).toBe("Query graph completed without an answer");
   });

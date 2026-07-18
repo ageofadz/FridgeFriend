@@ -322,7 +322,6 @@ export const QueryStreamEventSchema = z.discriminatedUnion("type", [
     workspaceActions: z.array(WorkspaceActionSchema).optional(),
     agentEvents: z.array(AgentActivityEventSchema).optional(),
     retrievalAudit: RecipeRetrievalAuditSchema.optional(),
-    memoryWriteVerificationError: z.string().optional(),
   }),
   z.object({
     type: z.literal("workspace_action"),

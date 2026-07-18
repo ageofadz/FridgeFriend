@@ -24,6 +24,10 @@ import {
 } from "../services/query-model.server";
 import type { FridgeQueryStateValue } from "../state";
 
+const GROCERY_PLAN_FAILURE_MESSAGE = "I couldn't finish the grocery plan. Please try again.";
+const PANTRY_COMPLETION_FAILURE_MESSAGE = "I couldn't finish the pantry plan. Please try again.";
+const ORGANIZATION_PLAN_FAILURE_MESSAGE = "I couldn't prepare that organization plan. Please try again.";
+
 // Errors swallowed by upstream nodes that should soften the final answer
 // instead of silently disappearing. Values are surfaced to the response model
 // as context (never dumped verbatim to the user) and to LangSmith as metadata.
@@ -32,7 +36,6 @@ function upstreamNodeErrors(state: FridgeQueryStateValue): Record<string, string
     recipeSearchError: state.recipeSearchError,
     intentRoutingError: state.context.intentRoutingError,
     memoryExtractionError: state.context.memoryExtractionError,
-    memoryWriteVerificationError: state.context.memoryWriteVerificationError,
     seededInventoryAssertionError: state.context.seededInventoryAssertionError,
     inventorySplitError: state.context.inventorySplitError,
   };
@@ -135,14 +138,11 @@ function createHumanMessageContent(input: {
       inventoryEnrichment: input.state.context.inventoryEnrichment,
       inventorySplitProposal: input.state.context.inventorySplitProposal,
       seededInventoryAssertions: input.state.context.seededInventoryAssertions,
-      ...(Array.isArray(input.state.context.memoryWriteResults) && input.state.context.memoryWriteResults.length > 0
-        ? { memoryWriteResults: input.state.context.memoryWriteResults }
-        : {}),
-      ...(typeof input.state.context.memoryWriteVerification === "object" && input.state.context.memoryWriteVerification !== null
-        ? { memoryWriteVerification: input.state.context.memoryWriteVerification }
-        : {}),
-      ...(typeof input.state.context.memoryWriteVerificationError === "string"
-        ? { memoryWriteVerificationError: input.state.context.memoryWriteVerificationError }
+      ...(typeof input.state.context.memoryWriteVerification === "object" &&
+      input.state.context.memoryWriteVerification !== null &&
+      "status" in input.state.context.memoryWriteVerification &&
+      typeof input.state.context.memoryWriteVerification.status === "string"
+        ? { memoryWriteVerification: { status: input.state.context.memoryWriteVerification.status } }
         : {}),
       scannedInventoryMutations: input.state.context.scannedInventoryMutations,
       externalInventory: input.state.externalInventory,
@@ -157,8 +157,8 @@ function createHumanMessageContent(input: {
 
   if (Object.keys(upstreamErrors).length > 0) {
     payload.degradedSteps = {
-      note: "Some background steps failed this turn. Answer with what is available, briefly and honestly acknowledge any capability the failures removed, and never quote these raw errors.",
-      errors: upstreamErrors,
+      note: "Some background steps were unavailable this turn. Answer with what is available and do not expose internal details.",
+      unavailableSteps: Object.keys(upstreamErrors),
     };
   }
   const text = JSON.stringify(payload);
@@ -399,11 +399,11 @@ export function createRespondNode(deps: QueryGraphDependencies) {
     const organizationPlan = state.context.organizationPlan;
 
     if (groceryPlanError) {
-      return { answer: groceryPlanError };
+      return { answer: GROCERY_PLAN_FAILURE_MESSAGE };
     }
 
     if (pantryCompletionError) {
-      return { answer: pantryCompletionError };
+      return { answer: PANTRY_COMPLETION_FAILURE_MESSAGE };
     }
 
     if (pantryCompletionClarification) {
@@ -411,7 +411,7 @@ export function createRespondNode(deps: QueryGraphDependencies) {
     }
 
     if (organizationPlanError) {
-      return { answer: organizationPlanError };
+      return { answer: ORGANIZATION_PLAN_FAILURE_MESSAGE };
     }
 
     if (

@@ -359,11 +359,11 @@ export function FoodLoadingIndicator({
 }
 
 function formatNodeStatus(node: string | undefined, message: string) {
-  return node ? `${node}: ${message}` : message;
+  return "Working...";
 }
 
 function formatToolStatus(event: Extract<QueryStreamEvent, { type: "tool" }>) {
-  return `${event.name}: ${event.message}`;
+  return "Working...";
 }
 
 function stableRecipeSlots(
@@ -926,7 +926,6 @@ function OrganizationPlanArtifact({
           <button className="ff-label-button" disabled={state === "submitting"} onClick={onRejected} type="button">{copy.rejectLabel}</button>
         </div>
       ) : null}
-      {error ? <p role="alert">{error}</p> : null}
     </section>
   );
 }
@@ -1662,10 +1661,12 @@ export function FridgeQueryChat({
 
       setDietaryProfile(nextDietaryProfile);
       onDietaryProfileChange(nextDietaryProfile);
-      updateAssistantMessage(messageId, (message) => ({
-        ...message,
-        memoryUpdateMessage: event.message,
-      }));
+      if (event.status === "verified") {
+        updateAssistantMessage(messageId, (message) => ({
+          ...message,
+          memoryUpdateMessage: event.message,
+        }));
+      }
       return;
     }
 
@@ -2030,10 +2031,8 @@ export function FridgeQueryChat({
                     ) : null}
                     {message.groceryPlanPending ? <GroceryPlanLoading stage={message.groceryPlanStage ?? "selecting_recipes"} /> : null}
                     {message.groceryPlan ? <GroceryPlanArtifact compact onOpenFullList={onOpenGroceryList} onRecipeIngredientHover={onRecipeIngredientHover} plan={message.groceryPlan} /> : null}
-                    {message.groceryPlanError ? <p className="ff-chat-error">{message.groceryPlanError}</p> : null}
                     {message.pantryCompletionPending ? <PantryCompletionLoading stage={message.pantryCompletionStage ?? "analyzing_recipes"} /> : null}
                     {message.pantryCompletionPlan ? <PantryCompletionArtifact onAdd={onAddPantryCompletionItems} plan={message.pantryCompletionPlan} /> : null}
-                    {message.pantryCompletionError ? <p className="ff-chat-error">{message.pantryCompletionError}</p> : null}
                     {message.organizationPlan ? <OrganizationPlanArtifact inventory={inventory} onCompleted={onOrganizationPlanCompleted} onRejected={onOrganizationPlanRejected} plan={message.organizationPlan} /> : null}
                     {message.recipeTournament && !message.groceryPlanPending && !message.groceryPlan && !message.groceryPlanError && !message.pantryCompletionPending && !message.pantryCompletionPlan && !message.pantryCompletionError && !message.pantryCompletionClarification ? (
                       <RecipeTournament onRecipeIngredientHover={onRecipeIngredientHover} tournament={message.recipeTournament} onMore={() => void submitQuery("Show more recipes.", { recipeContinuation: true })} />
@@ -2056,7 +2055,6 @@ export function FridgeQueryChat({
               </div>
             );
           })}
-          {error ? <p className="ff-chat-error">{error}</p> : null}
         </div>
       </div>
       {clarification ? (
