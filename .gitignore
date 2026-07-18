@@ -5,6 +5,7 @@ build/
 .env
 .DS_Store
 npm-debug.log*
+artifacts/
 
 # LangGraph API
 .langgraph_api

@@ -46,34 +46,6 @@ export async function scanFailedNode(state: ScanStateValue) {
     };
   }
 
-  if (
-    state.reconciliationValidation &&
-    !state.reconciliationValidation.valid
-  ) {
-    return {
-      scanStatus: "failed",
-      error: {
-        stage: "reconcile_locations",
-        code: "location_reconciliation_failed",
-        message:
-          state.reconciliationValidation.reason ??
-          "Location reconciliation failed",
-      },
-    };
-  }
-
-  if (state.adjudicationValidation && !state.adjudicationValidation.valid) {
-    return {
-      scanStatus: "failed",
-      error: {
-        stage: "adjudicate_locations",
-        code: "location_adjudication_failed",
-        message:
-          state.adjudicationValidation.reason ?? "Location adjudication failed",
-      },
-    };
-  }
-
   if (state.inventoryValidation && !state.inventoryValidation.valid) {
     return {
       scanStatus: "failed",

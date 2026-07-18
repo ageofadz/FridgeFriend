@@ -5,6 +5,12 @@ import {
   readGeminiStream,
 } from "../ai/gemini-errors.server";
 import { getLangSmithConfig } from "../langsmith.server";
+import { CHAT_MODEL } from "../ai/chat-model.server";
+import {
+  buildQueryTraceOptions,
+  graphRevisionFor,
+  resolveTraceEnvironment,
+} from "../observability/trace-context.server";
 import { loadPromptBundle } from "../prompts/registry.server";
 import { createCalculateSpaceNode } from "./nodes/calculate-space.node";
 import { createDetermineIntentNode } from "./nodes/determine-intent.node";
@@ -121,7 +127,7 @@ function queryThreadId(input: QueryGraphInput) {
   return input.threadId ?? `query:${input.imageId ?? input.fridgeId}`;
 }
 
-function normalizeQueryInput(input: QueryGraphInput) {
+export function normalizeQueryInput(input: QueryGraphInput) {
   const threadId = queryThreadId(input);
 
   return {
@@ -224,7 +230,7 @@ export function createQueryGraph(deps: QueryGraphDependencies = {}) {
       retryPolicy: queryGraphModelRetryPolicy,
     })
     .addNode("request_inventory_clarification", createRequestInventoryClarificationNode(deps))
-    .addNode("persist_inventory_enrichment", createPersistInventoryEnrichmentNode())
+    .addNode("persist_inventory_enrichment", createPersistInventoryEnrichmentNode(deps))
     .addNode("retrieve_recipes", createRetrieveRecipeCandidatesNode(deps), {
       retryPolicy: queryGraphModelRetryPolicy,
     })
@@ -430,18 +436,36 @@ export async function runQueryForFridgeImage(
   };
 }
 
+let cachedQueryGraphRevision: string | null = null;
+
+function queryGraphRevision() {
+  if (cachedQueryGraphRevision === null) {
+    cachedQueryGraphRevision = graphRevisionFor(createQueryGraph({ checkpointer: null }));
+  }
+  return cachedQueryGraphRevision;
+}
+
 function streamConfig(normalizedInput: ReturnType<typeof normalizeQueryInput>) {
   const langsmith = getLangSmithConfig();
+  const trace = buildQueryTraceOptions({
+    threadId: normalizedInput.threadId,
+    requestId: normalizedInput.requestId,
+    userId: normalizedInput.userId,
+    fridgeId: normalizedInput.fridgeId,
+    imageId: normalizedInput.imageId,
+    environment: resolveTraceEnvironment(),
+    mode: "live",
+    model: CHAT_MODEL,
+    promptRefs: {},
+    graphRevision: queryGraphRevision(),
+  });
 
   return {
-    runName: "query_fridge_inventory",
-    tags: ["fridgefriend", "query_graph", "chat"],
+    runName: trace.runName,
+    tags: trace.tags,
     maxConcurrency: QUERY_GRAPH_MAX_CONCURRENCY,
     metadata: {
-      userId: normalizedInput.userId,
-      fridgeId: normalizedInput.fridgeId,
-      imageId: normalizedInput.imageId,
-      thread_id: normalizedInput.threadId,
+      ...trace.metadata,
       ...(langsmith ? { langsmithProject: langsmith.project } : {}),
     },
     configurable: {

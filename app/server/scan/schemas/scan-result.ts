@@ -1,12 +1,8 @@
 import { z } from "zod";
 
 import {
-  FridgeZoneDetection,
   FridgeZoneMap,
   GroundedPlacement,
-  PredictedZoneHint,
-  RawDetection,
-  RELATIVE_ZONE_POSITIONS,
   MINIMUM_SUPPORT_ZONE_WIDTH_RATIO,
   ZoneType,
 } from "./inventory";
@@ -188,36 +184,6 @@ export const ZoneMapResponseSchema = {
   required: ["imageId", "zones"],
 } as const;
 
-export const LocationAdjudicationResponseSchema = {
-  type: "object",
-  properties: {
-    decisions: {
-      type: "array",
-      description:
-        "Location decisions for ambiguous detections using only supplied candidate zone ids.",
-      items: {
-        type: "object",
-        properties: {
-          detectionId: { type: "string" },
-          selectedZoneDetectionId: {
-            type: "string",
-            nullable: true,
-          },
-          confidence: { type: "number" },
-          reason: { type: "string" },
-        },
-        required: [
-          "detectionId",
-          "selectedZoneDetectionId",
-          "confidence",
-          "reason",
-        ],
-      },
-    },
-  },
-  required: ["decisions"],
-} as const;
-
 export const GroundItemPlacementsResponseSchema = {
   type: "object",
   properties: {
@@ -255,73 +221,12 @@ export type GroundItemPlacementsModelResultValue = z.infer<
 
 export const ZoneMapModelResult = FridgeZoneMap;
 
-export const LocationAdjudicationDecision = z.object({
-  detectionId: z.string(),
-  selectedZoneDetectionId: z.string().nullable(),
-  confidence: z.number().min(0).max(1),
-  reason: z.string(),
-});
-
-export const LocationAdjudicationModelResult = z.object({
-  decisions: z.array(LocationAdjudicationDecision),
-});
-
-export const ZoneMatch = z.object({
-  detectionId: z.string(),
-  zoneDetectionId: z.string(),
-  score: z.number(),
-  surfaceDistance: z.number().min(0),
-  horizontalOverlapRatio: z.number().min(0).max(1),
-});
-
-export const ReconciledLocation = z.discriminatedUnion("status", [
-  z.object({
-    status: z.literal("matched"),
-    detectionId: z.string(),
-    zone: FridgeZoneDetection,
-    score: z.number(),
-    match: ZoneMatch,
-  }),
-  z.object({
-    status: z.literal("ambiguous"),
-    detectionId: z.string(),
-    candidates: z.array(ZoneMatch).min(1),
-    reason: z.string(),
-  }),
-  z.object({
-    status: z.literal("needs_review"),
-    detectionId: z.string(),
-    reason: z.string(),
-  }),
-  z.object({
-    status: z.literal("unmatched"),
-    detectionId: z.string(),
-    reason: z.string(),
-  }),
-]);
-
-export const AmbiguousLocationRequest = z.object({
-  imageId: z.string(),
-  detectionId: z.string(),
-  detectionBox: RawDetection.shape.bbox,
-  candidateZones: z.array(
-    z.object({
-      zoneDetectionId: z.string(),
-      type: ZoneType,
-      boundingBox: RawDetection.shape.bbox,
-    }),
-  ),
-  reason: z.string(),
-});
-
 export const ScanError = z.object({
   stage: z.enum([
     "validate_images",
     "detect_inventory",
     "map_zones",
     "ground_item_placements",
-    "reconcile_locations",
-    "adjudicate_locations",
     "reconcile_inventory",
     "finalize_scan",
   ]),
@@ -333,15 +238,4 @@ export type ValidationResult = z.infer<typeof ValidationResult>;
 export type ImageValidationModelResult = z.infer<typeof ImageValidationModelResult>;
 export type InventoryDetectionModelResult = z.infer<typeof InventoryDetectionModelResult>;
 export type ZoneMapModelResult = z.infer<typeof ZoneMapModelResult>;
-export type LocationAdjudicationModelResult = z.infer<
-  typeof LocationAdjudicationModelResult
->;
-export type LocationAdjudicationDecision = z.infer<
-  typeof LocationAdjudicationDecision
->;
-export type ZoneMatch = z.infer<typeof ZoneMatch>;
-export type ReconciledLocation = z.infer<typeof ReconciledLocation>;
-export type AmbiguousLocationRequest = z.infer<
-  typeof AmbiguousLocationRequest
->;
 export type ScanError = z.infer<typeof ScanError>;

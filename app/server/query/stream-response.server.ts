@@ -13,8 +13,26 @@ type QueryStreamPersistence = {
   onError?(error: string): Promise<void> | void;
 };
 
+const QUERY_FAILURE_MESSAGE = "I couldn't complete that request. Please try again.";
+
 function encodeStreamEvent(event: QueryStreamEvent) {
   return `${JSON.stringify(event)}\n`;
+}
+
+function clientStreamEvent(event: QueryStreamEvent): QueryStreamEvent {
+  if (event.type === "error") {
+    return { ...event, error: QUERY_FAILURE_MESSAGE };
+  }
+
+  if (event.type === "agent_event" && event.event.type === "enrichment_failed") {
+    return { ...event, event: { ...event.event, error: "Couldn't inspect the selected item." } };
+  }
+
+  if (event.type === "agent_event" && event.event.type === "inventory_assertion_failed") {
+    return { ...event, event: { ...event.event, error: "Couldn't update the selected item." } };
+  }
+
+  return event;
 }
 
 export function createQueryStreamResponse(
@@ -56,7 +74,7 @@ export function createQueryStreamResponse(
             if (event.type === "error") {
               await persistence.onError?.(event.error);
             }
-            if (!enqueue(event) || event.type === "error") {
+            if (!enqueue(clientStreamEvent(event)) || event.type === "error") {
               return;
             }
           }
@@ -65,7 +83,7 @@ export function createQueryStreamResponse(
           await persistence.onError?.(message);
           enqueue({
             type: "error",
-            error: `Query graph invocation failed: ${message}`,
+            error: QUERY_FAILURE_MESSAGE,
           });
         } finally {
           if (!cancelled && controller.desiredSize !== null) {

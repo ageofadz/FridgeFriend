@@ -358,11 +358,11 @@ export function FoodLoadingIndicator({
   );
 }
 
-function formatNodeStatus(node: string | undefined, message: string) {
+function formatNodeStatus() {
   return "Working...";
 }
 
-function formatToolStatus(event: Extract<QueryStreamEvent, { type: "tool" }>) {
+function formatToolStatus() {
   return "Working...";
 }
 
@@ -920,6 +920,7 @@ function OrganizationPlanArtifact({
 
         return <li key={move.itemId}><strong>{itemLabel}</strong>: move from {fromLabel} to {toLabel}. {rationale}</li>;
       })}</ol>
+      {state === "error" && error ? <p role="alert">{error}</p> : null}
       {!completed ? (
         <div className="ff-organization-actions">
           <button className="ff-label-button" disabled={state === "submitting"} onClick={() => void complete()} type="button">{state === "submitting" ? "Applying..." : copy.applyLabel}</button>
@@ -1413,7 +1414,7 @@ export function FridgeQueryChat({
       updateAssistantMessage(messageId, (message) =>
         message.groceryPlanPending || message.groceryPlan || message.groceryPlanError || message.pantryCompletionPending || message.pantryCompletionPlan || message.pantryCompletionError || message.pantryCompletionClarification
           ? message
-          : setCurrentStep(message, formatNodeStatus(event.node, event.message))
+          : setCurrentStep(message, formatNodeStatus())
       );
       return;
     }
@@ -1422,7 +1423,7 @@ export function FridgeQueryChat({
       updateAssistantMessage(messageId, (message) =>
         message.groceryPlanPending || message.groceryPlan || message.groceryPlanError || message.pantryCompletionPending || message.pantryCompletionPlan || message.pantryCompletionError || message.pantryCompletionClarification
           ? message
-          : setCurrentStep(message, formatToolStatus(event))
+          : setCurrentStep(message, formatToolStatus())
       );
       return;
     }

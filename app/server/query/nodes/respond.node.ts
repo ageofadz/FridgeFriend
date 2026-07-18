@@ -1,5 +1,4 @@
 import { HumanMessage } from "@langchain/core/messages";
-import { getWriter, type LangGraphRunnableConfig } from "@langchain/langgraph";
 
 import { promptMessages } from "../../scan/services/prompt-messages.server";
 import type { QueryGraphDependencies } from "../schemas/query";
@@ -375,9 +374,7 @@ async function createResponseMessages(input: {
 export function createRespondNode(deps: QueryGraphDependencies) {
   return async function respondNode(
     state: FridgeQueryStateValue,
-    config?: LangGraphRunnableConfig,
   ) {
-    const writer = config ? getWriter(config) : undefined;
     if (state.answer) {
       return {
         answer: state.answer,

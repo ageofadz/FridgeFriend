@@ -2,7 +2,6 @@ import { AIMessage } from "@langchain/core/messages";
 
 import {
   CHAT_MODEL as GENERAL_MODEL,
-  CHAT_PROVIDER,
   createChatModel,
 } from "../../ai/chat-model.server";
 

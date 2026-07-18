@@ -11,13 +11,12 @@ import type {
   MemoryWriteResult,
   SemanticMemory,
 } from "../../memory/schemas";
-import type { Inventory } from "../../scan/schemas/inventory";
+import type { Inventory, InventoryEnrichment } from "../../scan/schemas/inventory";
 import type {
   AppliedSeededInventoryAssertion,
   SeededInventoryAssertion,
 } from "../services/seeded-inventory-assertion.server";
 import {
-  ConversationContextSchema,
   WorkspaceActionSchema,
   type ConversationContext,
 } from "../../../workspace/contracts";
@@ -557,4 +556,12 @@ export type QueryGraphDependencies = {
   loadImageDataUrlForQuery?: (
     imageId: string,
   ) => string | null | Promise<string | null>;
+  // Optional override for persisting focused-inventory enrichment writes.
+  // Defaults to the SQLite-backed appendFridgeInventoryEnrichments so
+  // production behavior is unchanged; eval fixtures inject a side-effect-free
+  // recorder here.
+  persistInventoryEnrichments?: (input: {
+    imageId: string;
+    enrichments: Array<InventoryEnrichment & { itemId: string }>;
+  }) => void | Promise<void>;
 };

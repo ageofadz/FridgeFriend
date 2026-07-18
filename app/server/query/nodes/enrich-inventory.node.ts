@@ -363,7 +363,16 @@ export function createRequestInventoryClarificationNode(deps: QueryGraphDependen
   };
 }
 
-export function createPersistInventoryEnrichmentNode() {
+export function createPersistInventoryEnrichmentNode(deps: QueryGraphDependencies = {}) {
+  // Defaults to the SQLite write; evals inject persistInventoryEnrichments so
+  // replay cases never touch the real database.
+  const persistEnrichments = deps.persistInventoryEnrichments ??
+    ((input: { imageId: string; enrichments: PendingInventoryEnrichment[] }) =>
+      appendFridgeInventoryEnrichments({
+        imageId: input.imageId,
+        enrichments: input.enrichments,
+      }));
+
   return async function persistInventoryEnrichmentNode(state: FridgeQueryStateValue) {
     const pending = pendingInventoryEnrichments(state);
 
@@ -381,7 +390,7 @@ export function createPersistInventoryEnrichmentNode() {
     );
 
     if (pendingWrites.length > 0) {
-      appendFridgeInventoryEnrichments({
+      await persistEnrichments({
         imageId: state.imageId,
         enrichments: pendingWrites,
       });

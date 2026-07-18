@@ -43,6 +43,9 @@ export function createGradeRecipeRetrievalNode(deps: QueryGraphDependencies = {}
             ingredients: recipe.ingredients,
             tags: recipe.matchedTags,
             minutes: recipe.minutes,
+            semanticScore: recipe.semanticScore,
+            ingredientCoverage: recipe.ingredientCoverage,
+            missingIngredients: recipe.missingIngredients,
           })),
         }),
       });

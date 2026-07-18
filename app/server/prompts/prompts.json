@@ -104,39 +104,13 @@
     ]
   },
   {
-    "name": "location-adjudication",
-    "description": "Resolve ambiguous item-to-zone assignments",
-    "templateFormat": "mustache",
-    "messages": [
-      {
-        "role": "system",
-        "content": "You resolve ambiguous item locations in a household food storage image using only candidate zones supplied by the system. Return only valid JSON with exactly one top-level field: decisions. Each decision must use a detectionId from the input. selectedZoneDetectionId must be one of that detection's candidate zoneDetectionId values, or null if the image does not support a decision. Do not create new zone ids. Image y increases downward. An item whose bounding-box lower edge is higher cannot be assigned to a shelf below an item whose bounding-box lower edge is lower."
-      },
-      {
-        "role": "human",
-        "content": [
-          {
-            "type": "text",
-            "text": "Resolve these ambiguous item locations for image {{image_id}}:\n{{adjudication_input_json}}"
-          },
-          {
-            "type": "image_url",
-            "image_url": {
-              "url": "{{image_data_url}}"
-            }
-          }
-        ]
-      }
-    ]
-  },
-  {
     "name": "query-memory-extraction",
     "description": "Extract durable memory candidates from a fridge query",
     "templateFormat": "mustache",
     "messages": [
       {
         "role": "system",
-        "content": "Extract only explicit durable facts; ignore temporary statements. Save dietary restrictions, preferences, goals, household facts, and inventory changes. Every explicitly stated ongoing personal or household outcome is a goal and must produce one schema-valid goal candidate, even without a numeric target. A request to retrieve, view, suggest, or show recipes or meal ideas is never a goal. Put its complete outcome in description, never subject. For inventory changes, use the stated location or fridge. The user message is accompanied by the current structured user-profile memory. Reconcile explicit retractions and reversals of those stored records against that context: emit ordinary remove or deactivate candidates for every matching record, copying its required fields exactly. When a user retracts an entire profile-memory category, emit one ordinary mutation for each stored record in that category. Never invent a remove or deactivate target when reconciling this context; if the supplied context has no matching record, emit no mutation. Treat a newly stated opposite food preference as replacing the earlier constraint on the same ingredient or food topic. Use remove, consume, or deactivate only when the user explicitly says an existing fact is no longer true. Return only schema-valid candidates."
+        "content": "Extract only explicit durable facts; ignore temporary statements. Save dietary restrictions, preferences, enduring goals, household facts, and inventory changes. An enduring goal is a self-described ongoing priority or outcome, not a request for an answer, plan, recommendation, organization, highlight, lookup, or other action in this conversation. A request to retrieve, view, suggest, show, organize, move, plan, or generate anything never creates a goal or another durable memory candidate. Put a qualifying goal's complete outcome in description, never subject. For inventory changes, use the stated location or fridge. The user message is accompanied by the current structured user-profile memory. Reconcile explicit retractions and reversals of those stored records against that context: emit ordinary remove or deactivate candidates for every matching record, copying its required fields exactly. When a user retracts an entire profile-memory category, emit one ordinary mutation for each stored record in that category. Never invent a remove or deactivate target when reconciling this context; if the supplied context has no matching record, emit no mutation. Treat a newly stated opposite food preference as replacing the earlier constraint on the same ingredient or food topic. Use remove, consume, or deactivate only when the user explicitly says an existing fact is no longer true. Return only schema-valid candidates."
       },
       {
         "role": "human",
@@ -166,7 +140,7 @@
     "messages": [
       {
         "role": "system",
-        "content": "Decide whether the retrieved local Food.com recipes are relevant to the user's recipe request. Judge the set against the requested meal, cuisine, flavor, constraints, available ingredients, and stated preferences. Return relevant false when the set misses the request or only has superficial keyword overlap. Return only the structured response."
+        "content": "Decide whether the retrieved local Food.com recipes are relevant to the user's recipe request. Judge the set against the requested meal, cuisine, flavor, constraints, available ingredients, stated preferences, semanticScore, ingredientCoverage, and missingIngredients. A low semanticScore is evidence that retrieval did not match the request even if a recipe shares ingredients. Return relevant false when the set misses the request, has weak semantic evidence, or only has superficial keyword overlap. Return only the structured response."
       },
       {
         "role": "human",
@@ -241,7 +215,7 @@
     "messages": [
       {
         "role": "system",
-        "content": "Plan visual actions for the FridgeFriend workspace using only item, zone, recipe, and evidence values supplied in the JSON. Never invent identifiers, camera coordinates, quantities, or shelf positions. Return exactly one JSON object with an actions array. Each action must be one of: focus_items with itemIds, emphasis, reason; focus_zone with zoneId and reason; show_evidence with itemId, imageId, and boundingBox copied exactly from supplied evidence; show_recipe_coverage with recipeId, availableItemIds, uncertainItemIds, missingIngredients; show_freshness with itemIds; preview_reorganization with placements containing itemId and zoneId; or reset_view. Prefer focus_items and show_evidence for questions about a visible item, show_recipe_coverage for a selected recipe, show_freshness for freshness questions, and preview_reorganization only when the user asks to reorganize."
+        "content": "Plan visual actions for the FridgeFriend workspace using only item, zone, recipe, and evidence values supplied in the JSON. Never invent identifiers, camera coordinates, quantities, or shelf positions. Return exactly one JSON object with an actions array. Each action must be one of: focus_items with itemIds, emphasis, reason; focus_zone with zoneId and reason; show_evidence with itemId, imageId, and boundingBox copied exactly from supplied evidence; show_recipe_coverage with recipeId, availableItemIds, uncertainItemIds, missingIngredients; show_freshness with itemIds; preview_reorganization with placements containing itemId and zoneId; or reset_view. When the request names a supplied visible item, emit focus_items for that exact item. When its supplied zone directly helps locate it, also emit focus_zone for that exact zone. For a quantity question about a supplied item, emit focus_items for the answered item. For freshness questions, emit show_freshness for the supplied priority items. Use show_recipe_coverage for a selected recipe. Emit preview_reorganization only for an existing organization plan. Return no action only when no supplied workspace entity is relevant to the request."
       },
       {
         "role": "human",
@@ -253,7 +227,7 @@
     "name": "intent-routing",
     "description": "Route a FridgeFriend request to one intent",
     "templateFormat": "mustache",
-    "messages": [{ "role": "system", "content": "Route a message to exactly one intent. {{intent_routing_choice_1}} {{intent_routing_choice_2}} {{intent_routing_choice_3}} Set enrichment.itemNames and enrichment.fields only when a missing inventory detail could materially change the answer. Fields are identity, quantity, fill_level, expiration_date, and opened. Leave both arrays empty when the coarse inventory is sufficient." }, { "role": "human", "content": "{{intent_routing_context_json}}" }]
+    "messages": [{ "role": "system", "content": "Route a message to exactly one intent. The candidate examples are semantic hints, not a constraint: classify the user's actual request even when every candidate is weak. Use general_chat for greetings, conversational messages, user facts, preferences, and confirmed inventory consumption; use placement_correction only when the user corrects or requests an item's recorded location. Use inventory for a visible-item lookup, including an explicit request to highlight it. Use enrichment for missing visible-item identity, quantity, fill level, expiration, or opened-state details that materially change an inventory answer. {{intent_routing_choice_1}} {{intent_routing_choice_2}} {{intent_routing_choice_3}} Set enrichment.itemNames and enrichment.fields only when a missing inventory detail could materially change the answer. Fields are identity, quantity, fill_level, expiration_date, and opened. Leave both arrays empty when the coarse inventory is sufficient." }, { "role": "human", "content": "{{intent_routing_context_json}}" }]
   },
   {
     "name": "seeded-inventory-assertions",

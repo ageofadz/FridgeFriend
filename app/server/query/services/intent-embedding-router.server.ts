@@ -259,17 +259,6 @@ function dotProduct(left: number[], right: number[]) {
   return left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
 }
 
-function recordsFromVectors(vectors: number[][]) {
-  if (vectors.length !== INTENT_EMBEDDING_EXAMPLES.length) {
-    throw new Error(`Intent example embedding returned ${vectors.length} vectors for ${INTENT_EMBEDDING_EXAMPLES.length} examples`);
-  }
-
-  return vectors.map((embedding, index) => ({
-    ...INTENT_EMBEDDING_EXAMPLES[index],
-    embedding: normalizeIntentEmbedding(embedding, `Intent example ${index + 1}`),
-  }));
-}
-
 function collectionLoader(dependencies: IntentEmbeddingDependencies) {
   return dependencies.getCollection ?? (getIntentExampleCollection as () => Promise<IntentExampleCollection>);
 }

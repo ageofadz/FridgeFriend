@@ -186,11 +186,20 @@ flowchart TD
 ```
 
 
-## Langsmith Evals
+## Observability
 
-You can see some evaluators for query intent (langsmith-query-intent-evaluators.py, langsmith-query-route-contract-evaluators.py)
+The two graphs are evaluated through thin eval wrappers (`query_eval_graph` / `scan_eval_graph`) that replay recorded model outputs against in-memory fixtures, get graph trajectory, and score results with deterministic evaluators alongside an optional LLM groundedness judge. Cases live in `examples/evals/*.jsonl` and are seeded into LangSmith datasets.
 
-We also have an example set of fridge images in langsmith-fridge-image-examples.jsonl used to evaluate VLM features in Langsmith.
+How to test:
+
+| Script | Behavior |
+| --- | --- |
+| `npm run eval:seed` | Seed/refresh the LangSmith datasets from `examples/evals/*.jsonl` (`--suite=query\|scan\|all`, `--replace`) |
+| `npm run eval:query:replay` | Query suite to replay model outputs |
+| `npm run eval:query:live` | Query suite against the live model, including the groundedness judge |
+| `npm run eval:scan:replay` / `eval:scan:live` | The same but for the scan suite |
+| `npm run eval:coverage` | Regenerate the query-graph coverage baseline and Mermaid artifacts under `artifacts/observability/` |
+| `npm run eval:smoke` | Smoke-test the deployed eval graphs on a running LangGraph server |
 
 ## Design Notes
 

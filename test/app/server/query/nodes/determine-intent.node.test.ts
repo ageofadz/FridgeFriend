@@ -145,7 +145,7 @@ describe("determine intent node", () => {
       recipeSearchExhausted: false,
     }));
 
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(1);
     expect(result.intent).toBe("recipe");
     expect(result.context).toMatchObject({
       intentRouting: {
@@ -215,7 +215,7 @@ describe("determine intent node", () => {
       },
     }));
 
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(1);
     expect(result).toMatchObject({
       intent: "inventory",
       context: {
@@ -262,7 +262,7 @@ describe("determine intent node", () => {
     });
   });
 
-  it("uses the top embedding candidate when embedding routing is unresolved", async () => {
+  it("uses structured intent classification when embedding routing is unresolved", async () => {
     let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
       { intent: "organization", enrichment: { itemNames: [], fields: [] } },
@@ -273,13 +273,13 @@ describe("determine intent node", () => {
 
     const result = await node(state({ query: "Can you help with this?" }));
 
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(1);
     expect(result).toMatchObject({
       intent: "organization",
     });
   });
 
-  it("routes to the top embedding candidate when no direct acceptance is returned", async () => {
+  it("uses structured intent classification when no direct acceptance is returned", async () => {
     const node = createDetermineIntentNode({
       ...deps({ intent: "inventory" }),
       intentEmbeddingRouter: async () => ({
@@ -291,13 +291,14 @@ describe("determine intent node", () => {
         ],
       }),
       intentModel: {
-        withStructuredOutput: () => {
-          return {
-            invoke: async () => {
-              throw new Error("intent model should not run when candidates are available");
-            },
-          };
-        },
+        withStructuredOutput: () => ({
+          invoke: async () => ({
+            intent: "shopping",
+            recipeContinuation: false,
+            shoppingMode: "direct",
+            enrichment: { itemNames: [], fields: [] },
+          }),
+        }),
       } as unknown as FridgeFriendChatModel,
     });
 
@@ -354,7 +355,7 @@ describe("determine intent node", () => {
     });
   });
 
-  it("routes organization choices without model classification", async () => {
+  it("routes organization choices through structured classification when unresolved", async () => {
     let modelCalls = 0;
     const node = createDetermineIntentNode(deps(
       { intent: "organization", enrichment: { itemNames: [], fields: [] } },
@@ -367,7 +368,7 @@ describe("determine intent node", () => {
       intent: "organization",
     });
 
-    expect(modelCalls).toBe(0);
+    expect(modelCalls).toBe(1);
   });
 
   it("accepts general chat as a non-clarification route", async () => {

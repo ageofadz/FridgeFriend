@@ -20,7 +20,6 @@ export const PromptName = {
   InventoryDetection: "inventory-detection",
   ZoneMap: "zone-map",
   GroundItemPlacements: "ground-item-placements",
-  LocationAdjudication: "location-adjudication",
   QueryMemoryExtraction: "query-memory-extraction",
   QueryRecipeSearch: "query-recipe-search",
   RecipeRetrievalGrade: "recipe-retrieval-grade",
@@ -59,7 +58,6 @@ export type PromptBundle = {
   inventoryDetection: LoadedPrompt<BaseChatPromptTemplate>;
   zoneMap: LoadedPrompt<BaseChatPromptTemplate>;
   groundItemPlacements: LoadedPrompt<BaseChatPromptTemplate>;
-  locationAdjudication: LoadedPrompt<BaseChatPromptTemplate>;
   queryMemoryExtraction: LoadedPrompt<BaseChatPromptTemplate>;
   queryRecipeSearch: LoadedPrompt<BaseChatPromptTemplate>;
   recipeRetrievalGrade: LoadedPrompt<BaseChatPromptTemplate>;
@@ -177,7 +175,6 @@ async function loadPromptBundleUncached(): Promise<PromptBundle> {
     inventoryDetection,
     zoneMap,
     groundItemPlacements,
-    locationAdjudication,
     queryMemoryExtraction,
     queryRecipeSearch,
     recipeRetrievalGrade,
@@ -199,7 +196,6 @@ async function loadPromptBundleUncached(): Promise<PromptBundle> {
     prompt<BaseChatPromptTemplate>(PromptName.InventoryDetection),
     prompt<BaseChatPromptTemplate>(PromptName.ZoneMap),
     prompt<BaseChatPromptTemplate>(PromptName.GroundItemPlacements),
-    prompt<BaseChatPromptTemplate>(PromptName.LocationAdjudication),
     prompt<BaseChatPromptTemplate>(PromptName.QueryMemoryExtraction),
     prompt<BaseChatPromptTemplate>(PromptName.QueryRecipeSearch),
     prompt<BaseChatPromptTemplate>(PromptName.RecipeRetrievalGrade),
@@ -222,7 +218,6 @@ async function loadPromptBundleUncached(): Promise<PromptBundle> {
     inventoryDetection,
     zoneMap,
     groundItemPlacements,
-    locationAdjudication,
     queryMemoryExtraction,
     queryRecipeSearch,
     recipeRetrievalGrade,

@@ -3,9 +3,6 @@ import { z } from "zod";
 
 import { FridgeZoneMap, GroundedPlacement, Inventory, RawDetection } from "./schemas/inventory";
 import {
-  AmbiguousLocationRequest,
-  LocationAdjudicationDecision,
-  ReconciledLocation,
   ScanError,
   ValidationResult,
 } from "./schemas/scan-result";
@@ -41,34 +38,11 @@ export const ScanState = new StateSchema({
   groundedPlacements: new ReducedValue(z.array(GroundedPlacement).default(() => []), {
     reducer: (current, next) => mergeByKey(current, next, (placement) => placement.detectionId),
   }),
-  reconciledLocations: new ReducedValue(
-    z.array(ReconciledLocation).default(() => []),
-    {
-      reducer: (current, next) =>
-        mergeByKey(current, next, (location) => location.detectionId),
-    },
-  ),
-  ambiguousLocationRequests: new ReducedValue(
-    z.array(AmbiguousLocationRequest).default(() => []),
-    {
-      reducer: (current, next) =>
-        mergeByKey(current, next, (request) => request.detectionId),
-    },
-  ),
-  adjudicationDecisions: new ReducedValue(
-    z.array(LocationAdjudicationDecision).default(() => []),
-    {
-      reducer: (current, next) =>
-        mergeByKey(current, next, (decision) => decision.detectionId),
-    },
-  ),
   inventory: Inventory.nullable().default(null),
   imageValidation: ValidationResult.nullable().default(null),
   detectionValidation: ValidationResult.nullable().default(null),
   zoneMapValidation: ValidationResult.nullable().default(null),
   placementValidation: ValidationResult.nullable().default(null),
-  reconciliationValidation: ValidationResult.nullable().default(null),
-  adjudicationValidation: ValidationResult.nullable().default(null),
   inventoryValidation: ValidationResult.nullable().default(null),
   scanStatus: z
     .enum(["pending", "processing", "completed", "failed"])

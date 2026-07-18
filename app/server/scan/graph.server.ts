@@ -6,6 +6,12 @@ import {
 } from "../ai/gemini-errors.server";
 import type { StorageImageLocation } from "../images.server";
 import { getLangSmithConfig } from "../langsmith.server";
+import { CHAT_VISION_MODEL } from "../ai/chat-model.server";
+import {
+  buildScanTraceOptions,
+  graphRevisionFor,
+  resolveTraceEnvironment,
+} from "../observability/trace-context.server";
 import { loadPromptBundle } from "../prompts/registry.server";
 import { createDetectInventoryNode } from "./nodes/detect-inventory.node";
 import { createGroundItemPlacementsNode } from "./nodes/ground-item-placements.node";
@@ -52,18 +58,29 @@ function scanThreadId(imageId: string) {
   return `scan:${imageId}`;
 }
 
-function scanConfig(input: ScanGraphInput) {
+function scanConfig(input: ScanGraphInput, graphRevision: string) {
   const langsmith = getLangSmithConfig();
   const threadId = scanThreadId(input.imageId);
+  const graphInput = scanGraphInput(input);
+  const trace = buildScanTraceOptions({
+    threadId,
+    requestId: "",
+    fridgeId: input.fridgeId,
+    imageId: input.imageId,
+    environment: resolveTraceEnvironment(),
+    mode: "live",
+    model: CHAT_VISION_MODEL,
+    promptRefs: {},
+    graphRevision,
+    imageCount: graphInput.imageIds.length,
+    storageKind: input.storageLocation,
+  });
 
   return {
-    runName: "scan_storage_image",
-    tags: ["fridgefriend", "scan_graph", "upload_scan"],
+    runName: trace.runName,
+    tags: trace.tags,
     metadata: {
-      fridgeId: input.fridgeId,
-      imageId: input.imageId,
-      storageLocation: input.storageLocation,
-      thread_id: threadId,
+      ...trace.metadata,
       ...(langsmith ? { langsmithProject: langsmith.project } : {}),
     },
     configurable: {
@@ -88,8 +105,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * The scan pipeline:
  *
  * validate_images -> start_scan_analysis -> detect_inventory + map_zones
- * (parallel) -> reconcile_locations -> [adjudicate_locations] ->
- * reconcile_inventory -> finalize_scan.
+ * (parallel) -> ground_item_placements -> reconcile_inventory -> finalize_scan.
  *
  * Every validation failure routes to scan_failed, which records the failing
  * stage and reason. Database persistence happens in the caller — the graph
@@ -162,7 +178,7 @@ export async function runScanForStorageImage(input: ScanGraphInput) {
 
   return graph.invoke(
     scanGraphInput(input),
-    scanConfig(input),
+    scanConfig(input, graphRevisionFor(graph)),
   );
 }
 
@@ -170,7 +186,7 @@ export async function* streamScanForStorageImage(
   input: ScanGraphInput,
 ): AsyncGenerator<Exclude<ScanStreamEvent, { type: "image_created" | "complete" }>, ScanStateValue> {
   const graph = await createScanGraph();
-  const config = scanConfig(input);
+  const config = scanConfig(input, graphRevisionFor(graph));
   const stream = await graph.stream(
     scanGraphInput(input),
     {

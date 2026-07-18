@@ -42,10 +42,6 @@ function numericConstraintIsGrounded(query: string, value: number | null, label:
   return `Recipe search interpretation included ${label} ${value}, which was not present in the user request`;
 }
 
-function hasExplicitRequirement(query: string) {
-  return /\b(must|only|strictly|required|require)\b/iu.test(query);
-}
-
 export function validateRecipeSearchInterpretation(input: {
   query: string;
   interpretation: RecipeSearchInterpretation;

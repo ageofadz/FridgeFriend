@@ -2,7 +2,9 @@
   "dependencies": ["."],
   "graphs": {
     "scan_graph": "./app/server/scan/graph.server.ts:createScanGraph",
-    "query_graph": "./app/server/query-graph.server.ts:createQueryGraph"
+    "query_graph": "./app/server/query-graph.server.ts:createQueryGraph",
+    "query_eval_graph": "./app/server/evals/graphs/query-eval.graph.ts:createQueryEvalGraph",
+    "scan_eval_graph": "./app/server/evals/graphs/scan-eval.graph.ts:createScanEvalGraph"
   },
   "env": "./.env",
   "node_version": "22"
