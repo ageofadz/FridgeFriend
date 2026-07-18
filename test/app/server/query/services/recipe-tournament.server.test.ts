@@ -16,6 +16,7 @@ function recipe(id: string, score = 0.5): RankedRecipe {
     proteinDailyValue: 20,
     ingredients: ["chicken"],
     matchedIngredients: ["chicken"],
+    matchedInventoryIngredients: ["chicken"],
     missingIngredients: [],
     matchedTags: ["dinner"],
     matchBadges: [],

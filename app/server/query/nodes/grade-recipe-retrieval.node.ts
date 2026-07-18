@@ -77,32 +77,7 @@ export function createGradeRecipeRetrievalNode(deps: QueryGraphDependencies = {}
 }
 
 function irrelevantResult(state: FridgeQueryStateValue, grade: RecipeRetrievalGrade) {
-  if (grade.relevant || state.recipeRewriteCount < 1) {
-    return { recipeRetrievalGrade: grade };
-  }
-  const current = state.context.recipeRetrieval;
-  const retrieval = current && typeof current === "object" ? current as Record<string, unknown> : {};
-  const audit = state.recipeRetrievalAudit
-    ? {
-      ...state.recipeRetrievalAudit,
-      tournamentCandidates: 0,
-      terminalReason: "tournament_empty" as const,
-    }
-    : null;
   return {
     recipeRetrievalGrade: grade,
-    recipeSearchExhausted: true,
-    context: {
-      ...state.context,
-      recipeRetrieval: {
-        ...retrieval,
-        recipes: [],
-        noMatches: true,
-        exhausted: true,
-        reason: `Recipe retrieval remained irrelevant after one corrective attempt: ${grade.reason}`,
-        ...(audit ? { audit } : {}),
-      },
-    },
-    recipeRetrievalAudit: audit,
   };
 }

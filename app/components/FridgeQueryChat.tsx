@@ -1723,7 +1723,7 @@ export function FridgeQueryChat({
         pantryCompletionClarification: event.pantryCompletionClarification ?? message.pantryCompletionClarification,
         pantryCompletionPending: false,
         pantryCompletionStage: undefined,
-        organizationPlan: event.organizationPlan ?? message.organizationPlan,
+        organizationPlan: event.organizationPlan,
       }));
       return;
     }

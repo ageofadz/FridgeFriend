@@ -32,6 +32,7 @@ export type RankedRecipe = {
   proteinDailyValue: number | null;
   ingredients: string[];
   matchedIngredients: string[];
+  matchedInventoryIngredients: string[];
   missingIngredients: string[];
   matchedTags: string[];
   matchBadges: string[];
@@ -70,6 +71,10 @@ export type RecipeCoverageMode = "available_ingredients" | "dish_specific";
 
 const GENERALIZABLE_BASE_INGREDIENTS = new Set([
   "beef", "chicken", "egg", "fish", "pork", "shrimp", "tofu", "turkey",
+]);
+
+const PANTRY_SUPPORT_WORDS = new Set([
+  "oil", "sugar", "spice", "spices",
 ]);
 
 function clamp(value: number) {
@@ -271,6 +276,30 @@ function primaryIngredientSignature(recipe: RankedRecipe) {
   return recipe.ingredients.slice(0, 2).sort().join("|");
 }
 
+function isMeaningfulInventoryIngredient(ingredient: string) {
+  const normalized = normalizeIngredientName(ingredient);
+  return !isUniversalBasicIngredient(normalized) &&
+    !normalized.split(" ").some((word) => PANTRY_SUPPORT_WORDS.has(word));
+}
+
+function meaningfulMatchedIngredientCount(recipe: RankedRecipe) {
+  return recipe.matchedInventoryIngredients.filter(isMeaningfulInventoryIngredient).length;
+}
+
+function meaningfulMissingIngredientCount(recipe: RankedRecipe) {
+  return recipe.missingIngredients.filter(isMeaningfulInventoryIngredient).length;
+}
+
+function compareIngredientSmartRecipes(left: RankedRecipe, right: RankedRecipe) {
+  return meaningfulMatchedIngredientCount(right) - meaningfulMatchedIngredientCount(left) ||
+    right.ingredientCoverage - left.ingredientCoverage ||
+    meaningfulMissingIngredientCount(left) - meaningfulMissingIngredientCount(right) ||
+    right.matchedInventoryIngredients.length - left.matchedInventoryIngredients.length ||
+    left.missingIngredients.length - right.missingIngredients.length ||
+    right.score - left.score ||
+    left.id.localeCompare(right.id);
+}
+
 function nameSimilarity(left: RankedRecipe, right: RankedRecipe) {
   const leftWords = new Set(normalizeRecipeTag(left.name).split(" ").filter(Boolean));
   const rightWords = new Set(normalizeRecipeTag(right.name).split(" ").filter(Boolean));
@@ -366,6 +395,11 @@ export function rankRecipeCandidates(input: {
       { allowUniversalBasicOverlap: true },
     );
     const matchedIngredients = ingredients.filter((ingredient) => matchesAvailableIngredient(ingredient, availableIngredients));
+    const matchedInventoryIngredients = availableIngredients.flatMap((availableIngredient) =>
+      ingredients.some((ingredient) => matchesAvailableIngredient(ingredient, [availableIngredient]))
+        ? [normalizeIngredientName(availableIngredient.name)]
+        : []
+    );
     const matchedRequestedIngredients = requestedIngredientMatches(ingredients, requestedIngredients);
     const missingIngredients = ingredients
       .filter((ingredient) => !matchesAvailableIngredient(ingredient, availableIngredients))
@@ -402,24 +436,32 @@ export function rankRecipeCandidates(input: {
     const wasteReductionScore = totalWasteScore === 0 ? 0 : clamp(matchedWasteScore / totalWasteScore);
     const expiringCoverage = wasteReductionScore;
     const ratingScore = recipe.rating ? clamp(recipe.rating.average / 5) : 0;
-    const score = semanticScore * 0.2 + tagScore * 0.22 + ingredientScore * 0.18 +
-      ingredientCoverage * 0.18 + wasteReductionScore * 0.16 + preferenceScore * 0.07 +
-      ratingScore * 0.03 + requestedIngredientScore * 0.08 - missingIngredients.length * 0.03;
+    const meaningfulMatchedCount = matchedInventoryIngredients.filter(isMeaningfulInventoryIngredient).length;
+    const meaningfulMissingCount = missingIngredients.filter(isMeaningfulInventoryIngredient).length;
+    const score = coverageMode === "available_ingredients"
+      ? meaningfulMatchedCount * 0.42 + ingredientCoverage * 0.34 + ingredientScore * 0.1 +
+        matchedInventoryIngredients.length * 0.02 + wasteReductionScore * 0.08 + preferenceScore * 0.02 +
+        ratingScore * 0.02 - meaningfulMissingCount * 0.05
+      : semanticScore * 0.2 + tagScore * 0.22 + ingredientScore * 0.18 +
+        ingredientCoverage * 0.18 + wasteReductionScore * 0.16 + preferenceScore * 0.07 +
+        ratingScore * 0.03 + requestedIngredientScore * 0.08 - missingIngredients.length * 0.03;
     ranked.push({
       id: recipe.id, name: recipe.name, description: recipe.description, minutes: recipe.minutes,
       calories: recipe.nutrition.calories, proteinDailyValue: recipe.nutrition.proteinDailyValue,
-      ingredients, matchedIngredients, missingIngredients,
+      ingredients, matchedIngredients, matchedInventoryIngredients, missingIngredients,
       matchedTags: [...new Set([...(candidate.matchedTags ?? []), ...selectUsefulTags(tags)])].sort(),
       matchBadges: badges(tags, matchedIngredients, input.search),
       ingredientCoverage, expiringCoverage, wasteReductionScore, usesSoonIngredients, semanticScore, tagScore, preferenceScore, ratingScore,
       eligibilityBand: band, score, intentTier: candidate.intentTier,
     } satisfies RankedRecipe);
   }
-  ranked.sort((left, right) =>
-    intentTierRank(left.intentTier) - intentTierRank(right.intentTier) ||
-    right.score - left.score ||
-    right.ingredientCoverage - left.ingredientCoverage ||
-    left.id.localeCompare(right.id));
+  ranked.sort(coverageMode === "available_ingredients"
+    ? compareIngredientSmartRecipes
+    : (left, right) =>
+      intentTierRank(left.intentTier) - intentTierRank(right.intentTier) ||
+      right.score - left.score ||
+      right.ingredientCoverage - left.ingredientCoverage ||
+      left.id.localeCompare(right.id));
   const limit = input.limit ?? 5;
   const minimumPrimaryIntentResults = input.minimumPrimaryIntentResults ?? 1;
   const primary = ranked.filter((recipe) => recipe.intentTier === "primary");
@@ -428,13 +470,17 @@ export function rankRecipeCandidates(input: {
       ? primary
       : ranked.filter((recipe) => recipe.intentTier === "primary" || recipe.intentTier === "related")
     : ranked;
-  const strict = intentEligible.filter((recipe) => recipe.eligibilityBand === "strict");
-  const selectedStrict = diversifyRecipesByIntentTier(strict, limit);
-  const relaxed = intentEligible.filter((recipe) => recipe.eligibilityBand === "relaxed");
-  const recipes = [
-    ...selectedStrict,
-    ...diversifyRecipesByIntentTier(relaxed, Math.max(0, limit - selectedStrict.length), selectedStrict),
-  ];
+  const recipes = coverageMode === "available_ingredients"
+    ? diversifyRecipes(intentEligible, limit)
+    : (() => {
+      const strict = intentEligible.filter((recipe) => recipe.eligibilityBand === "strict");
+      const selectedStrict = diversifyRecipesByIntentTier(strict, limit);
+      const relaxed = intentEligible.filter((recipe) => recipe.eligibilityBand === "relaxed");
+      return [
+        ...selectedStrict,
+        ...diversifyRecipesByIntentTier(relaxed, Math.max(0, limit - selectedStrict.length), selectedStrict),
+      ];
+    })();
   const exhausted = recipes.length < limit;
   const terminalReason = recipes.length > 0
     ? "ready"

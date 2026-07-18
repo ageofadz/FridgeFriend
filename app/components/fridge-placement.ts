@@ -135,7 +135,10 @@ function imageGroundedReviewPlacement(
   };
 }
 
-export function buildImageGroundedPlacementLayout(inventory: Inventory) {
+export function buildImageGroundedPlacementLayout(
+  inventory: Inventory,
+  directSupportZoneByItemId: ReadonlyMap<string, string> = new Map(),
+) {
   if (inventory.sceneVersion !== "image-grounded-v2") {
     throw new Error("Cannot use image-grounded placement layout for a legacy inventory");
   }
@@ -159,18 +162,21 @@ export function buildImageGroundedPlacementLayout(inventory: Inventory) {
 
     resolving.add(item.id);
     try {
-      const baseZone = item.scene.supportKind === "zone"
-        ? zonesById.get(item.scene.supportId)
-        : (() => {
-          const support = itemsById.get(item.scene.supportId);
-          if (!support) throw new Error(`Cannot render image-grounded placement because support item ${item.scene!.supportId} was not found`);
-          const supportPlacement = place(support);
-          if (!supportPlacement) {
-            placementsById.set(item.id, null);
-            return null;
-          }
-          return supportPlacement.supportZone;
-        })();
+      const directSupportZoneId = directSupportZoneByItemId.get(item.id);
+      const baseZone = directSupportZoneId
+        ? zonesById.get(directSupportZoneId)
+        : item.scene.supportKind === "zone"
+          ? zonesById.get(item.scene.supportId)
+          : (() => {
+            const support = itemsById.get(item.scene.supportId);
+            if (!support) throw new Error(`Cannot render image-grounded placement because support item ${item.scene!.supportId} was not found`);
+            const supportPlacement = place(support);
+            if (!supportPlacement) {
+              placementsById.set(item.id, null);
+              return null;
+            }
+            return supportPlacement.supportZone;
+          })();
       if (baseZone === null) return null;
       if (!baseZone) throw new Error(`Cannot render image-grounded placement because support zone ${item.scene.supportId} was not found`);
       const xBounds = zoneWorldXBounds(baseZone);

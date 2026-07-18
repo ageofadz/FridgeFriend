@@ -24,6 +24,7 @@ function candidate(id: string, missingIngredients: string[], score: number): Ran
     proteinDailyValue: 20,
     ingredients: ["chicken", ...missingIngredients],
     matchedIngredients: ["chicken"],
+    matchedInventoryIngredients: ["chicken"],
     missingIngredients,
     matchedTags: ["dinner"],
     matchBadges: [],

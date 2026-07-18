@@ -10,9 +10,9 @@ const PROMPT_NAMESPACE = "fridgefriend";
 
 const RECIPE_PROMPT_REVISIONS = {
   "query-recipe-search": "e698678c42c64a5e3f67b3432d3e3bf492f4411c103097f8fef4a6cdb50450c1",
-  "recipe-retrieval-grade": "955d9b7184d3fd296088036f3353243b64da183a789673718dfdbaf7d891a6c0",
+  "recipe-retrieval-grade": "2ec88264e6c5eec4469088fa787af28c58654fe81d673180f9d83727d1a9837d",
   "recipe-tournament-evaluation": "9c4f3e5cdffa7a0b06bcc6df6bc3620fb8cb42d97bf17604d211962e0305da92",
-  "query-response": "d0d875334af058c1478636b7494a032197477afc8b07afbbab0ea5949fc2db12",
+  "query-response": "4b8ef421ebefa80ba6595229c0fd8488fb5c7f6d42feea77f8b2b884a6e51773",
 } as const;
 
 export const PromptName = {

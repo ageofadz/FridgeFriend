@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isVisibleResponseMessageMetadata,
+  normalizeQueryInput,
   resumeQueryForFridgeImage,
   runQueryForFridgeImage,
   streamQueryForFridgeImage,
@@ -405,6 +406,24 @@ function fakeDeps(input: {
 }
 
 describe("query graph streaming", () => {
+  it("clears transient HITL artifacts when starting a new query", () => {
+    const normalized = normalizeQueryInput({
+      fridgeId: "fridge-1",
+      imageId: "image-1",
+      query: "Show me dinner ideas.",
+    });
+
+    expect(normalized.context).toMatchObject({
+      organizationPlan: null,
+      organizationPlanError: null,
+      groceryPlan: null,
+      groceryPlanError: null,
+      pantryCompletionPlan: null,
+      pantryCompletionError: null,
+      pantryCompletionClarification: null,
+    });
+  });
+
   it("streams smart pantry completion without recipe tournament events", async () => {
     const recipes = [
       createRecipe({ id: "one", name: "Garlic chicken", ingredients: ["chicken", "garlic"] }),
@@ -1082,6 +1101,53 @@ describe("query graph streaming", () => {
       answer: null,
     } as unknown as FridgeQueryStateValue)).resolves.toMatchObject({
       answer: "I have removed the carrots from your library.",
+    });
+  });
+
+  it("provides scanned inventory to the recipe response alongside final recipe cards", async () => {
+    let payload: Record<string, unknown> | null = null;
+    const node = createRespondNode({
+      promptBundle: testPromptBundle(),
+      loadInventoryForImage: () => createInventory({
+        item: { name: "eggs", label: "Eggs", cat: "eggs", subcat: "egg" },
+      }),
+      responseModel: {
+        invoke: async (messages: Array<{ content: unknown }>) => {
+          payload = JSON.parse(String(messages.at(-1)?.content));
+          return new AIMessage("Try the egg rice bowl.");
+        },
+      } as unknown as FridgeFriendChatModel,
+    });
+
+    await node({
+      userId: "default-user",
+      fridgeId: "fridge-1",
+      imageId: "image-1",
+      query: "What can I make?",
+      threadId: "test-thread",
+      intent: "recipe",
+      memoryValidations: [],
+      memoryWriteResults: [],
+      externalInventory: [],
+      dietaryRestrictions: [],
+      dietaryPreferences: [],
+      activeGoals: [],
+      semanticMemories: [],
+      visualEvidence: [],
+      context: {
+        recipeRetrieval: {
+          recipes: [{ id: "egg-rice", name: "Egg Rice Bowl", missingIngredients: [] }],
+          noMatches: false,
+        },
+      },
+      answer: null,
+    } as unknown as FridgeQueryStateValue);
+
+    expect(payload).toMatchObject({
+      context: {
+        inventory: { items: [{ canonicalName: "eggs" }] },
+        recipeRetrieval: { noMatches: false, recipes: [{ id: "egg-rice" }] },
+      },
     });
   });
 

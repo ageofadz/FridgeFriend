@@ -40,6 +40,13 @@ function inventory(imageId: string): Inventory {
       qty: { amount: 1, unit: "package", precision: "estimated", fillLevel: null },
       pack: "container",
       stack: { on: "item-2", conf: 0.9, why: "direct support" },
+      scene: {
+        status: "placed",
+        supportKind: "item",
+        supportId: "item-2",
+        depth: { back: 0.4, front: 0.6 },
+        confidence: 0.9,
+      },
       loc: {
         status: "matched",
         zoneId: "zone-1",
@@ -161,6 +168,13 @@ describe("organization placement persistence", () => {
       assignment: { source: "user_confirmed", planId: plan.id },
     });
     expect(moved.loc.observations[0].depthBackRatio).toBeCloseTo(0.4);
+    expect(moved.scene).toEqual({
+      status: "placed",
+      supportKind: "zone",
+      supportId: "zone-2",
+      depth: { back: 0.4, front: 0.6 },
+      confidence: 0.9,
+    });
   });
 
   it("marks a placement correction stale when saved inventory changed before apply", () => {

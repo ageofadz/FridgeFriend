@@ -105,6 +105,13 @@ export function completeOrganizationPlan(planId: string) {
           return {
             ...item,
             stack: undefined,
+            ...(item.scene?.status === "placed" ? {
+              scene: {
+                ...item.scene,
+                supportKind: "zone" as const,
+                supportId: zone.id,
+              },
+            } : {}),
             loc: {
               ...item.loc,
               status: "matched",

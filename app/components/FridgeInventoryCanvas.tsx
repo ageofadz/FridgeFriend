@@ -497,7 +497,7 @@ export function FridgeInventoryCanvas({
     );
 
     const placements = inventory.sceneVersion === "image-grounded-v2"
-      ? buildImageGroundedPlacementLayout(inventory)
+      ? buildImageGroundedPlacementLayout(inventory, directSupportZoneByItemId)
       : buildInventoryPlacementLayout(inventory, directSupportZoneByItemId);
 
     return placements.map((placement) => {

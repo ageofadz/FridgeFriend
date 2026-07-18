@@ -25,12 +25,14 @@ describe("recipe retrieval correction routing", () => {
     expect(route).toHaveLength(20);
   });
 
-  it("allows exactly one query rewrite before ending the retrieval", () => {
+  it("allows one query rewrite, then evaluates the nonempty corrected set", () => {
     expect(routeRecipeRetrievalGrade(state({ recipeRetrievalGrade: { relevant: false, reason: "miss" } }))).toBe("rewrite_recipe_query");
-    expect(routeRecipeRetrievalGrade(state({
+    const route = routeRecipeRetrievalGrade(state({
       recipeRetrievalGrade: { relevant: false, reason: "miss" },
       recipeRewriteCount: 1,
-    }))).toBe("respond");
+    }));
+    expect(Array.isArray(route)).toBe(true);
+    expect(route).toHaveLength(20);
   });
 
   it("rewrites once when retrieval returns no tournament candidates", () => {

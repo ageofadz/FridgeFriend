@@ -384,6 +384,65 @@ describe("rankRecipeCandidates", () => {
 });
 
 describe("inventory recipe ranking", () => {
+  it("ranks broad inventory recipes by meaningful ingredient use over semantic source tier", () => {
+    const multiIngredient = recipe({
+      id: "multi-ingredient",
+      name: "Carrot Egg Rice Bowl",
+      ingredients: [
+        { rawName: "eggs", canonicalName: "egg" },
+        { rawName: "carrots", canonicalName: "carrot" },
+        { rawName: "rice", canonicalName: "rice" },
+        { rawName: "oil", canonicalName: "oil" },
+        { rawName: "salt", canonicalName: "salt" },
+        { rawName: "onion", canonicalName: "onion" },
+      ],
+    });
+    const semanticBreadMatch = recipe({
+      id: "semantic-bread-match",
+      name: "Bread Snack",
+      ingredients: [
+        { rawName: "bread", canonicalName: "bread" },
+        { rawName: "butter", canonicalName: "butter" },
+      ],
+    });
+
+    const result = rankRecipeCandidates({
+      candidates: [
+        { recipeId: "semantic-bread-match", semanticScore: 0.99, intentTier: "primary" },
+        {
+          recipeId: "multi-ingredient",
+          semanticScore: 0.1,
+          ingredientScore: 5 / 6,
+          intentTier: "coverage",
+        },
+      ],
+      recipes: [semanticBreadMatch, multiIngredient],
+      search: {
+        ...search,
+        semanticQuery: "recipe using egg carrot rice bread oil salt",
+        semanticQueryWithoutInventory: "recipe",
+        intent: { specific: false, relatedSemanticQuery: null },
+        useAvailableIngredients: true,
+      },
+      availableIngredients: [
+        { name: "egg", expirationDate: null },
+        { name: "carrot", expirationDate: null },
+        { name: "rice", expirationDate: null },
+        { name: "bread", expirationDate: null },
+        { name: "oil", expirationDate: null },
+        { name: "salt", expirationDate: null },
+      ],
+      dietaryRestrictions: [],
+      dietaryPreferences: [],
+      activeGoals: [],
+    });
+
+    expect(result.recipes.map((candidate) => candidate.id)).toEqual([
+      "multi-ingredient",
+      "semantic-bread-match",
+    ]);
+  });
+
   it("admits low-coverage inventory matches into the tournament intake", () => {
     const strict = recipe({
       id: "strict",
@@ -472,7 +531,7 @@ describe("inventory recipe ranking", () => {
       activeGoals: [],
     });
 
-    expect(result.recipes.map((candidate) => candidate.id)).toEqual(["incidental", "practical"]);
+    expect(result.recipes.map((candidate) => candidate.id)).toEqual(["practical", "incidental"]);
     expect(result.recipes.find((candidate) => candidate.id === "practical")).toMatchObject({
       matchedIngredients: ["greek yogurt", "strawberry"],
       missingIngredients: ["honey", "walnut"],

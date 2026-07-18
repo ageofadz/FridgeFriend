@@ -12,7 +12,6 @@ import type { AvailableRecipeIngredient } from "./recipe-retrieval.server";
 
 const INITIAL_VECTOR_CANDIDATE_LIMIT = 50;
 const CORRECTIVE_VECTOR_CANDIDATE_LIMIT = 120;
-const MAX_VECTOR_QUERY_INGREDIENTS = 8;
 
 function normalizedPhrase(value: string) {
   return normalizeRecipeTag(value);
@@ -77,7 +76,6 @@ function orderedInventoryTerms(ingredients: AvailableRecipeIngredient[]) {
     .sort((left, right) => right.wasteScore - left.wasteScore || left.name.localeCompare(right.name))
     .map((ingredient) => ingredient.name)
     .filter((name, index, values) => values.indexOf(name) === index)
-    .slice(0, MAX_VECTOR_QUERY_INGREDIENTS);
 }
 
 function compileVectorQuery(input: {

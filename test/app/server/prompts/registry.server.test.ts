@@ -75,7 +75,7 @@ describe("prompt registry", () => {
     const { loadPromptBundle } = await import("../../../../app/server/prompts/registry.server");
 
     await expect(loadPromptBundle()).resolves.toMatchObject({
-      queryResponse: { ref: "fridgefriend-query-response:d0d875334af058c1478636b7494a032197477afc8b07afbbab0ea5949fc2db12" },
+      queryResponse: { ref: "fridgefriend-query-response:4b8ef421ebefa80ba6595229c0fd8488fb5c7f6d42feea77f8b2b884a6e51773" },
     });
     expect(pull).not.toHaveBeenCalledWith(
       "fridgefriend-eval-query-answer-groundedness:latest",
@@ -98,7 +98,7 @@ describe("prompt registry", () => {
     const { loadPromptBundle } = await import("../../../../app/server/prompts/registry.server");
 
     await expect(loadPromptBundle()).rejects.toThrow(
-      "Approved recipe Prompt Hub prompt fridgefriend-query-response:d0d875334af058c1478636b7494a032197477afc8b07afbbab0ea5949fc2db12 could not load: prompt not found",
+      "Approved recipe Prompt Hub prompt fridgefriend-query-response:4b8ef421ebefa80ba6595229c0fd8488fb5c7f6d42feea77f8b2b884a6e51773 could not load: prompt not found",
     );
   });
 });

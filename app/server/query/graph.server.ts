@@ -167,6 +167,22 @@ export function normalizeQueryInput(input: QueryGraphInput) {
       memoryWriteVerification: null,
       memoryWriteVerificationError: null,
       scannedInventoryMutations: [],
+      seededInventoryAssertions: [],
+      seededInventoryAssertionError: null,
+      inventoryQuery: null,
+      inventoryEnrichment: null,
+      pendingInventoryEnrichments: [],
+      inventorySplitProposal: null,
+      inventorySplitError: null,
+      recipeRetrieval: null,
+      expiryPlan: null,
+      groceryPlan: null,
+      groceryPlanError: null,
+      pantryCompletionPlan: null,
+      pantryCompletionError: null,
+      pantryCompletionClarification: null,
+      organizationPlan: null,
+      organizationPlanError: null,
       recipeContinuationRequested: input.recipeContinuation === true,
       conversationContext: input.conversationContext ?? {
         selectedItemIds: [],
@@ -1068,7 +1084,7 @@ export async function* streamQueryForFridgeImage(
         }
 
         const organizationPlan = organizationPlanFromContext(context);
-        if (organizationPlan) {
+        if (organizationPlan && (node === "plan_organization" || node === "plan_placement_correction")) {
           finalOrganizationPlan = organizationPlan;
           yield { type: "organization_plan", plan: organizationPlan };
         }

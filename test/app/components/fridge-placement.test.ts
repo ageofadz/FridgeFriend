@@ -126,6 +126,50 @@ describe("fridge placement layout", () => {
     );
   });
 
+  it("uses an explicit correction preview zone for an image-grounded item", () => {
+    const topShelf = {
+      id: "top-shelf",
+      type: "shelf" as const,
+      label: "Top shelf",
+      order: 0,
+      boundingBox: { x: 0, y: 0.15, width: 1, height: 0.03 },
+      surfaceY: 0.18,
+      imageIds: [imageId],
+      sourceZoneDetectionIds: ["top-shelf"],
+      confidence: 0.9,
+      estimatedCapacityRatio: null,
+      estimatedOccupiedRatio: null,
+    };
+    const middleShelf = {
+      ...topShelf,
+      id: "middle-shelf",
+      label: "Middle shelf",
+      order: 1,
+      boundingBox: { x: 0, y: 0.5, width: 1, height: 0.03 },
+      surfaceY: 0.53,
+    };
+    const cloves = item({
+      id: "cloves",
+      scene: {
+        status: "placed",
+        supportKind: "zone",
+        supportId: middleShelf.id,
+        depth: { back: 0.2, front: 0.5 },
+        confidence: 0.9,
+      },
+    });
+
+    const [placement] = buildImageGroundedPlacementLayout(
+      { ...inventory([cloves], [topShelf, middleShelf]), sceneVersion: "image-grounded-v2" },
+      new Map([[cloves.id, topShelf.id]]),
+    );
+
+    expect(placement.supportZone.id).toBe(topShelf.id);
+    expect(placement.y - placement.height / 2).toBeCloseTo(
+      supportSurfaceTopY({ ...topShelf, boundingBox: { ...topShelf.boundingBox, y: topShelf.surfaceY - topShelf.boundingBox.height } }),
+    );
+  });
+
   it("clamps an image-grounded item that crosses an intervening shelf to its support surface", () => {
     const shelf = {
       id: "v2-shelf",

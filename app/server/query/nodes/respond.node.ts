@@ -382,8 +382,7 @@ export function createRespondNode(deps: QueryGraphDependencies) {
     }
 
     const query = state.query.trim();
-    const shouldLoadInventory = state.intent !== "general_chat" &&
-      (state.intent !== "recipe" || !state.context.recipeRetrieval);
+    const shouldLoadInventory = state.intent !== "general_chat";
     const inventory = (inventoryWasEnriched(state) ? undefined : inventoryFromQueryState(state)) ??
       (shouldLoadInventory ? await loadInventoryContext(state, deps) : null);
 
